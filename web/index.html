@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PaperHunter</title>
+    <link rel="stylesheet" href="/styles.css?v=20260515-card-clamp" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="检索控制">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">PH</div>
+          <div>
+            <p class="brand-kicker">Research Inbox</p>
+            <h1>PaperHunter</h1>
+          </div>
+        </div>
+
+        <form id="searchForm" class="control-panel">
+          <section class="filter-section">
+            <div class="filter-heading">
+              <strong>基础筛选</strong>
+              <span>主题、任务和时间范围</span>
+            </div>
+
+            <label class="field">
+              <span>检索关键词</span>
+              <input
+                id="queryInput"
+                name="query"
+                type="search"
+                autocomplete="off"
+                placeholder="vision language model, catalyst, black hole..."
+              />
+            </label>
+
+            <label class="field">
+              <span>研究意图</span>
+              <select id="intentSelect">
+                <option value="general" selected>综合检索</option>
+                <option value="latest">最新进展</option>
+                <option value="survey">综述 / Survey</option>
+                <option value="benchmark">Benchmark / Dataset</option>
+                <option value="method">方法论文</option>
+                <option value="application">应用案例</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>研究领域</span>
+              <select id="fieldPreset">
+                <option value="all" selected>全部学科</option>
+                <option value="ai-ml">AI / 机器学习</option>
+                <option value="cs">计算机科学</option>
+                <option value="math">数学</option>
+                <option value="physics">物理 / 天文</option>
+                <option value="stats">统计学</option>
+                <option value="eess">电子工程 / 信号</option>
+                <option value="bio">生命科学 / 医学计算</option>
+                <option value="econ-fin">经济 / 金融</option>
+                <option value="custom">自定义 arXiv 分类</option>
+              </select>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span>起始年份</span>
+                <input id="yearFromInput" type="number" min="1990" max="2100" placeholder="不限" />
+              </label>
+              <label class="field">
+                <span>结束年份</span>
+                <input id="yearToInput" type="number" min="1990" max="2100" placeholder="不限" />
+              </label>
+            </div>
+
+            <label class="checkbox-row">
+              <input id="downloadableOnlyInput" type="checkbox" checked />
+              <span>只看可直接下载 PDF</span>
+            </label>
+          </section>
+
+          <section class="filter-section">
+            <div class="filter-heading">
+              <strong>来源筛选</strong>
+              <span>开放论文源优先</span>
+            </div>
+            <fieldset class="field">
+              <legend>数据源</legend>
+              <div class="source-grid">
+                <label><input type="checkbox" value="arxiv" checked /> <span>arXiv</span></label>
+                <label><input type="checkbox" value="semantic" /> <span>Semantic Scholar</span></label>
+                <label><input type="checkbox" value="cvf" /> <span>CVF Open Access</span></label>
+                <label><input type="checkbox" value="acl" /> <span>ACL Anthology</span></label>
+                <label><input type="checkbox" value="openreview" /> <span>OpenReview</span></label>
+                <label><input type="checkbox" value="chinarxiv" /> <span>ChinaRxiv</span></label>
+                <label><input type="checkbox" value="sciopen" /> <span>SciOpen</span></label>
+                <label><input type="checkbox" value="nso" /> <span>NSO</span></label>
+              </div>
+            </fieldset>
+            <label class="field source-limit-control">
+              <span>每个数据源最多 <strong id="perSourceLimitValue">5</strong> 篇</span>
+              <input id="perSourceLimitInput" type="range" min="1" max="20" step="1" value="5" />
+            </label>
+            <div id="sourceLimitNote" class="source-limit-note">已选 1 个源，最多返回 5 篇</div>
+            <div class="gateway-panel">
+              <div class="gateway-heading">
+                <strong>国内外部入口</strong>
+                <span>需要网页确认的来源</span>
+              </div>
+              <div id="externalGateways" class="gateway-list"></div>
+            </div>
+          </section>
+
+          <details class="filter-section advanced-filters">
+            <summary>
+              <span>高级筛选</span>
+              <small>作者、会议、匹配范围、arXiv 分类</small>
+            </summary>
+
+            <label class="field">
+              <span>作者</span>
+              <input id="authorInput" type="text" autocomplete="off" placeholder="Yoshua Bengio" />
+            </label>
+
+            <label class="field">
+              <span>会议 / 期刊 / 来源</span>
+              <input id="venueInput" type="text" autocomplete="off" placeholder="CVPR, ICLR, ACL, Nature..." />
+            </label>
+
+            <label class="field">
+              <span>关键词匹配范围</span>
+              <select id="matchScopeSelect">
+                <option value="all" selected>标题 + 摘要 + 作者 + 会议</option>
+                <option value="title">只匹配标题</option>
+                <option value="abstract">只匹配摘要</option>
+                <option value="author">只匹配作者</option>
+              </select>
+            </label>
+
+            <fieldset class="field">
+              <legend>排序方式</legend>
+              <div class="segmented-control" role="group" aria-label="排序方式">
+                <button type="button" class="segment is-active" data-sort="recent">最新</button>
+                <button type="button" class="segment" data-sort="relevance">相关</button>
+              </div>
+            </fieldset>
+
+            <fieldset class="field">
+              <legend>arXiv 分类 <small id="categoryHint">由研究领域自动设置</small></legend>
+              <div class="category-grid">
+                <label><input type="checkbox" value="cs.AI" /> <span>cs.AI</span></label>
+                <label><input type="checkbox" value="cs.CL" /> <span>cs.CL</span></label>
+                <label><input type="checkbox" value="cs.CV" /> <span>cs.CV</span></label>
+                <label><input type="checkbox" value="cs.LG" /> <span>cs.LG</span></label>
+                <label><input type="checkbox" value="cs.RO" /> <span>cs.RO</span></label>
+                <label><input type="checkbox" value="math.OC" /> <span>math.OC</span></label>
+                <label><input type="checkbox" value="math.PR" /> <span>math.PR</span></label>
+                <label><input type="checkbox" value="math.NA" /> <span>math.NA</span></label>
+                <label><input type="checkbox" value="stat.ML" /> <span>stat.ML</span></label>
+                <label><input type="checkbox" value="stat.AP" /> <span>stat.AP</span></label>
+                <label><input type="checkbox" value="physics.optics" /> <span>physics.optics</span></label>
+                <label><input type="checkbox" value="astro-ph.GA" /> <span>astro-ph.GA</span></label>
+                <label><input type="checkbox" value="eess.SP" /> <span>eess.SP</span></label>
+                <label><input type="checkbox" value="eess.IV" /> <span>eess.IV</span></label>
+                <label><input type="checkbox" value="q-bio.QM" /> <span>q-bio.QM</span></label>
+                <label><input type="checkbox" value="q-bio.NC" /> <span>q-bio.NC</span></label>
+                <label><input type="checkbox" value="q-fin.ST" /> <span>q-fin.ST</span></label>
+                <label><input type="checkbox" value="econ.EM" /> <span>econ.EM</span></label>
+                <label><input type="checkbox" value="All" checked /> <span>All</span></label>
+              </div>
+            </fieldset>
+          </details>
+
+          <button class="primary-action" type="submit">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M10.8 18.1a7.3 7.3 0 1 1 5.16-2.14l4.04 4.04-1.41 1.41-4.04-4.04a7.27 7.27 0 0 1-3.75 1.03Zm0-2a5.3 5.3 0 1 0 0-10.6 5.3 5.3 0 0 0 0 10.6Z" />
+            </svg>
+            检索论文
+          </button>
+        </form>
+
+        <div class="source-card">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div>
+            <strong>合规开放源</strong>
+            <p>CNKI、万方、X-MOL 等需要登录、授权或人机验证的来源仅作为外部入口。</p>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="hero">
+          <div>
+            <p class="eyebrow">论文获取工作台</p>
+            <h2>论文检索工作台</h2>
+          </div>
+          <div class="hero-panel" aria-label="本地状态">
+            <div>
+              <span>本地 PDF</span>
+              <strong id="savedCount">0</strong>
+            </div>
+            <div>
+              <span>当前来源</span>
+              <strong id="currentSources">arXiv</strong>
+            </div>
+          </div>
+        </header>
+
+        <section class="metrics-grid" aria-label="检索状态">
+          <div class="metric">
+            <span>检索结果</span>
+            <strong id="resultCount">0</strong>
+          </div>
+          <div class="metric">
+            <span>数据源</span>
+            <strong id="sourceSummary">arXiv</strong>
+          </div>
+          <div class="metric">
+            <span>当前关键词</span>
+            <strong id="currentQuery">未输入</strong>
+          </div>
+          <div class="metric">
+            <span>领域</span>
+            <strong id="currentCategories">全部学科 / All</strong>
+          </div>
+        </section>
+
+        <section class="activity-bar" aria-live="polite">
+          <div id="message" class="message">未开始检索。</div>
+          <button id="downloadAllButton" class="secondary-action" type="button" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M11 4h2v9.17l3.59-3.58L18 11l-6 6-6-6 1.41-1.41L11 13.17V4Zm-5 15h12v2H6v-2Z" />
+            </svg>
+            批量下载
+          </button>
+        </section>
+
+        <div class="progress-track" aria-hidden="true">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+
+        <section id="results" class="results-list" aria-label="论文列表">
+          <div class="empty-state">
+            <p class="empty-kicker">Ready</p>
+            <h3>等待检索</h3>
+            <p>检索结果会显示在这里。</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js?v=20260515-card-clamp" defer></script>
+  </body>
+</html>
