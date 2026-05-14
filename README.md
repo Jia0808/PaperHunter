@@ -1,17 +1,34 @@
-# PaperHunter
+<div align="center">
+  <h1>PaperHunter</h1>
+  <p><strong>A local research paper discovery and PDF download workspace for researchers.</strong></p>
+  <p>
+    English · <a href="README.zh-CN.md">简体中文</a>
+  </p>
+  <p>
+    <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+    <a href="https://github.com/Jia0808/PaperHunter/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Jia0808/PaperHunter/actions/workflows/ci.yml/badge.svg"></a>
+    <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12%2B-3776AB">
+    <img alt="Local first" src="https://img.shields.io/badge/local--first-research-2F6FED">
+  </p>
+</div>
 
-PaperHunter is a local research paper discovery and PDF download workspace.
+![PaperHunter dashboard](docs/assets/paperhunter-dashboard.png)
 
-It provides a browser-based UI for searching open paper sources, filtering research results, and downloading public open-access PDFs into a local folder.
+## Why PaperHunter
 
-## Features
+PaperHunter helps researchers search across multiple open paper sources, filter results with research-oriented controls, and download public open-access PDFs into a local folder. It is designed as a practical literature discovery tool rather than a crawler that bypasses access controls.
 
-- Multi-source search across arXiv, Semantic Scholar, CVF Open Access, ACL Anthology, OpenReview, ChinaRxiv / ChinaXiv, SciOpen, and National Science Open.
-- Research-oriented filters: intent, field, year range, downloadable-only mode, author, venue, match scope, and arXiv categories.
-- Per-source result control, so selecting more sources does not let one source dominate the result list.
+The project uses a plain Python backend and a native HTML/CSS/JavaScript frontend. It does not require a database, account system, or cloud service.
+
+## Highlights
+
+- Multi-source search across international and domestic open sources.
+- Research-friendly filters for intent, field, year range, author, venue, match scope, arXiv category, and downloadable-only results.
+- Per-source result limits, so one large source does not dominate the list.
 - Local PDF download with duplicate detection.
-- External gateway buttons for sources that usually require login, institutional permission, payment, or CAPTCHA.
-- Plain Python backend plus native HTML/CSS/JavaScript frontend. No database is required.
+- External gateway buttons for CNKI, Wanfang, X-MOL, Nature, Science, and other sources that usually require login, institutional permission, payment, or CAPTCHA.
+- Local-first workflow: downloaded PDFs stay under `downloaded_papers/`, which is ignored by Git.
+- Lightweight stack: Python 3.12, `requests`, `arxiv`, and browser-native frontend code.
 
 ## Supported Sources
 
@@ -25,11 +42,11 @@ It provides a browser-based UI for searching open paper sources, filtering resea
 | ChinaRxiv / ChinaXiv | Yes | Public open PDFs only | Domestic open paper source. |
 | SciOpen | Yes | Public open PDFs only | Domestic/open-access source. |
 | National Science Open | Yes | Public open PDFs only | Open journal source. |
-| CNKI, Wanfang, X-MOL | External gateway only | No automated download | These sources often require login, authorization, payment, or human verification. |
+| CNKI, Wanfang, X-MOL, Nature, Science | External gateway only | No automated download | These sources often require login, authorization, payment, or human verification. |
 
 ## Quick Start
 
-Python 3.12 is recommended.
+Python 3.12 or newer is recommended.
 
 ```bash
 python -m venv venv
@@ -50,26 +67,25 @@ On Windows, you can also run:
 start_paperhunter.bat
 ```
 
+## Typical Workflow
+
+1. Enter a research keyword or phrase.
+2. Select research intent, field, year range, source group, and per-source limit.
+3. Run the search and review metadata, venues, years, and PDF availability.
+4. Download selected open-access PDFs or batch-download downloadable results.
+5. Use external gateway buttons when a source needs browser-side login or institution access.
+
 ## Project Structure
 
 ```text
-app.py                    Python HTTP server, search adapters, filters, downloads
+app.py                    Python HTTP server, source adapters, filters, downloads
 web/index.html            Browser UI structure
 web/styles.css            UI styling
 web/app.js                Frontend state, filters, API calls
 downloaded_papers/        Local PDF output directory, ignored by Git
+docs/assets/              README and documentation images
 .github/workflows/ci.yml  Syntax checks for Python and JavaScript
 ```
-
-## Local Data
-
-PDF files are saved to:
-
-```text
-downloaded_papers/
-```
-
-This directory is ignored by Git. Do not commit downloaded papers, cache files, cookies, credentials, or local environment paths.
 
 ## Development Checks
 
@@ -78,21 +94,29 @@ python -m py_compile app.py
 node --check web/app.js
 ```
 
+## Compliance
+
+PaperHunter only attempts automated downloads from open PDF URLs or public open-access endpoints. It does not bypass paywalls, authentication, CAPTCHA, institutional access controls, or publisher restrictions.
+
+Sources such as CNKI, Wanfang, X-MOL, Nature, Science, and similar websites may require login, institutional authorization, payment, or human verification. PaperHunter exposes them only as external browser entry points where appropriate.
+
+See [DISCLAIMER.md](DISCLAIMER.md) for details.
+
 ## Repository Safety
 
 If you publish this repository on GitHub, review [docs/REPOSITORY_SAFETY.md](docs/REPOSITORY_SAFETY.md). At minimum:
 
 - enable two-factor authentication on the owner account
-- avoid granting collaborator `Admin` permissions
 - protect the `main` branch
 - disallow force pushes and branch deletion
+- avoid granting collaborator `Admin` permissions unless necessary
 - keep a local mirror backup
 
-## Disclaimer
+## Contributing
 
-PaperHunter is intended for personal research workflow automation and open-access literature discovery. It does not bypass paywalls, login systems, CAPTCHA, institutional authorization, or publisher access controls.
+Issues and pull requests are welcome. Please keep source integrations compliant with each website's terms of service and avoid adding logic that bypasses access restrictions.
 
-See [DISCLAIMER.md](DISCLAIMER.md) for details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution guide and [SECURITY.md](SECURITY.md) for security reporting.
 
 ## License
 
