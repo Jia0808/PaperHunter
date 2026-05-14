@@ -60,3 +60,9 @@ git push origin v0.1.0
 ```
 
 Tags make it easier to recover a known good version even if the main branch changes.
+
+## GitHub References
+
+- Repository rulesets: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets
+- Creating repository rulesets: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository
+- Available rules, including deletion and force-push restrictions: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets
