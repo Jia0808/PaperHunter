@@ -21,6 +21,7 @@ downloaded_papers/
 path.txt
 .env
 .env.*
+.tools/
 .claude/
 .agents/
 
