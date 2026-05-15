@@ -26,7 +26,7 @@ The project uses a plain Python backend and a native HTML/CSS/JavaScript fronten
 - Research-friendly filters for intent, field, year range, author, venue, match scope, arXiv category, and downloadable-only results.
 - Per-source result limits, so one large source does not dominate the list.
 - Local PDF download with duplicate detection.
-- External gateway buttons for CNKI, Wanfang, X-MOL, Nature, Science, and other sources that usually require login, institutional permission, payment, or CAPTCHA.
+- External gateway buttons for Google Scholar, CNKI, Wanfang, X-MOL, Nature, Science, and other sources that usually require login, institutional permission, payment, robots.txt restrictions, or CAPTCHA.
 - Local-first workflow: downloaded PDFs stay under `downloaded_papers/`, which is ignored by Git.
 - Lightweight stack: Python 3.12, `requests`, `arxiv`, and browser-native frontend code.
 
@@ -42,7 +42,7 @@ The project uses a plain Python backend and a native HTML/CSS/JavaScript fronten
 | ChinaRxiv / ChinaXiv | Yes | Public open PDFs only | Domestic open paper source. |
 | SciOpen | Yes | Public open PDFs only | Domestic/open-access source. |
 | National Science Open | Yes | Public open PDFs only | Open journal source. |
-| CNKI, Wanfang, X-MOL, Nature, Science | External gateway only | No automated download | These sources often require login, authorization, payment, or human verification. |
+| Google Scholar, CNKI, Wanfang, X-MOL, Nature, Science | External gateway only | No automated download | These sources may require manual browsing, login, authorization, payment, robots.txt compliance, or human verification. |
 
 ## Quick Start
 
@@ -98,7 +98,7 @@ node --check web/app.js
 
 PaperHunter only attempts automated downloads from open PDF URLs or public open-access endpoints. It does not bypass paywalls, authentication, CAPTCHA, institutional access controls, or publisher restrictions.
 
-Sources such as CNKI, Wanfang, X-MOL, Nature, Science, and similar websites may require login, institutional authorization, payment, or human verification. PaperHunter exposes them only as external browser entry points where appropriate.
+Sources such as Google Scholar, CNKI, Wanfang, X-MOL, Nature, Science, and similar websites may require manual browsing, login, institutional authorization, payment, robots.txt compliance, or human verification. PaperHunter exposes them only as external browser entry points where appropriate.
 
 See [DISCLAIMER.md](DISCLAIMER.md) for details.
 

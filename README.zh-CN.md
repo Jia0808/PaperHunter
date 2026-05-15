@@ -26,7 +26,7 @@ PaperHunter 用来帮助研究人员同时检索多个开放论文来源，通�
 - 支持研究意图、研究领域、年份范围、作者、期刊/会议、匹配范围、arXiv 分类、仅可下载结果等筛选条件。
 - 支持控制每个数据源返回篇数，避免单个大源占满结果列表。
 - 支持本地 PDF 下载和重复文件识别。
-- 为知网、万方、X-MOL、Nature、Science 等通常需要登录、机构权限、付费或验证码的来源提供外部入口。
+- 为 Google Scholar、知网、万方、X-MOL、Nature、Science 等通常需要手动浏览、登录、机构权限、付费、遵守 robots.txt 或验证码的来源提供外部入口。
 - 本地优先：下载的 PDF 保存在 `downloaded_papers/`，该目录不会提交到 Git。
 - 技术栈轻量：Python 3.12、`requests`、`arxiv` 和浏览器原生前端代码。
 
@@ -42,7 +42,7 @@ PaperHunter 用来帮助研究人员同时检索多个开放论文来源，通�
 | ChinaRxiv / ChinaXiv | 支持 | 仅公开开放 PDF | 国内开放论文来源。 |
 | SciOpen | 支持 | 仅公开开放 PDF | 国内/开放访问来源。 |
 | National Science Open | 支持 | 仅公开开放 PDF | 开放期刊来源。 |
-| 知网、万方、X-MOL、Nature、Science | 仅外部入口 | 不自动下载 | 这些来源通常需要登录、授权、付费或人工验证。 |
+| Google Scholar、知网、万方、X-MOL、Nature、Science | 仅外部入口 | 不自动下载 | 这些来源可能需要手动浏览、登录、授权、付费、遵守 robots.txt 或人工验证。 |
 
 ## 快速开始
 
@@ -98,7 +98,7 @@ node --check web/app.js
 
 PaperHunter 只会尝试从开放 PDF 链接或公开开放访问端点自动下载论文，不会绕过付费墙、登录、验证码、机构访问控制或出版方限制。
 
-知网、万方、X-MOL、Nature、Science 等网站可能需要登录、机构授权、付费或人工验证。PaperHunter 只在适当情况下提供外部浏览器入口。
+Google Scholar、知网、万方、X-MOL、Nature、Science 等网站可能需要手动浏览、登录、机构授权、付费、遵守 robots.txt 或人工验证。PaperHunter 只在适当情况下提供外部浏览器入口。
 
 更多说明见 [DISCLAIMER.md](DISCLAIMER.md)。
 

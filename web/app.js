@@ -60,6 +60,11 @@ const sourceLabels = {
 
 const externalGateways = [
   {
+    label: "Google Scholar",
+    tag: "手动查看",
+    url: (query) => query ? `https://scholar.google.com/scholar?q=${query}` : "https://scholar.google.com/",
+  },
+  {
     label: "CNKI 知网",
     tag: "权限/验证",
     url: (query) => query ? `https://kns.cnki.net/kns8s/defaultresult/index?kw=${query}` : "https://kns.cnki.net/",
