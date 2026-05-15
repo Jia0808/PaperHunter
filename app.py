@@ -48,6 +48,7 @@ SOURCE_LABELS = {
     "nso": "National Science Open",
 }
 EXTERNAL_GATEWAYS = {
+    "google_scholar": "Google Scholar",
     "cnki": "CNKI 知网",
     "wanfang": "万方数据",
     "xmol": "X-MOL",
