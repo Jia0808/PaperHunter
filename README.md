@@ -26,8 +26,11 @@ The project uses a plain Python backend and a native HTML/CSS/JavaScript fronten
 - Research-friendly filters for intent, field, year range, author, venue, match scope, arXiv category, and downloadable-only results.
 - Per-source result limits, so one large source does not dominate the list.
 - Local PDF download with duplicate detection.
+- Local paper inbox for favorites, ignored papers, recent searches, and download status, stored in `data/library.json`.
+- BibTeX and Markdown reading-list export for saved favorites, including full abstracts when source metadata provides them.
+- Favorite metadata refresh to update older saved records and recover full abstracts when available.
 - External gateway buttons for Google Scholar, CNKI, Wanfang, X-MOL, Nature, Science, and other sources that usually require login, institutional permission, payment, robots.txt restrictions, or CAPTCHA.
-- Local-first workflow: downloaded PDFs stay under `downloaded_papers/`, which is ignored by Git.
+- Local-first workflow: downloaded PDFs stay under `downloaded_papers/`, and library state stays under `data/`; both are ignored by Git.
 - Lightweight stack: Python 3.12, `requests`, `arxiv`, and browser-native frontend code.
 
 ## Supported Sources
@@ -72,8 +75,11 @@ start_paperhunter.bat
 1. Enter a research keyword or phrase.
 2. Select research intent, field, year range, source group, and per-source limit.
 3. Run the search and review metadata, venues, years, and PDF availability.
-4. Download selected open-access PDFs or batch-download downloadable results.
-5. Use external gateway buttons when a source needs browser-side login or institution access.
+4. Save useful papers to the local inbox, or ignore papers you do not want to see again.
+5. Export saved favorites as BibTeX or a Markdown reading list for citation management and later translation.
+6. Refresh favorite metadata when older saved items show truncated abstracts.
+7. Download selected open-access PDFs or batch-download downloadable results.
+8. Use external gateway buttons when a source needs browser-side login or institution access.
 
 ## Project Structure
 
@@ -82,8 +88,10 @@ app.py                    Python HTTP server, source adapters, filters, download
 web/index.html            Browser UI structure
 web/styles.css            UI styling
 web/app.js                Frontend state, filters, API calls
+data/                     Local inbox state, ignored by Git
 downloaded_papers/        Local PDF output directory, ignored by Git
 docs/assets/              README and documentation images
+tests/                    Backend regression tests
 .github/workflows/ci.yml  Syntax checks for Python and JavaScript
 ```
 
@@ -91,6 +99,7 @@ docs/assets/              README and documentation images
 
 ```bash
 python -m py_compile app.py
+python -m unittest discover -s tests
 node --check web/app.js
 ```
 

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PaperHunter</title>
-    <link rel="stylesheet" href="/styles.css?v=20260515-card-clamp" />
+    <link rel="stylesheet" href="/styles.css?v=20260524-local-inbox" />
   </head>
   <body>
     <div class="app-shell">
@@ -187,6 +187,43 @@
             <p>CNKI、万方、X-MOL 等需要登录、授权或人机验证的来源仅作为外部入口。</p>
           </div>
         </div>
+
+        <section class="library-panel" aria-label="本地收件箱">
+          <div class="library-heading">
+            <div>
+              <strong>本地收件箱</strong>
+              <span>收藏、忽略和导出</span>
+            </div>
+            <button id="clearHistoryButton" class="text-action" type="button">清空历史</button>
+          </div>
+
+          <div class="library-stats">
+            <div>
+              <span>收藏</span>
+              <strong id="favoriteCount">0</strong>
+            </div>
+            <div>
+              <span>忽略</span>
+              <strong id="ignoredCount">0</strong>
+            </div>
+          </div>
+
+          <div class="export-row">
+            <button id="exportFavoritesBibButton" class="secondary-action compact-action" type="button" disabled>导出收藏 BibTeX</button>
+            <button id="exportFavoritesMarkdownButton" class="secondary-action compact-action" type="button" disabled>导出阅读清单</button>
+          </div>
+          <div class="refresh-row">
+            <button id="refreshFavoritesButton" class="secondary-action compact-action" type="button" disabled>刷新收藏元数据</button>
+            <span id="libraryRefreshNote">旧收藏的摘要可能已截断，刷新后会尽量补全。</span>
+          </div>
+
+          <div class="history-block">
+            <div class="history-title">最近检索</div>
+            <div id="searchHistory" class="history-list">
+              <span class="history-empty">暂无历史</span>
+            </div>
+          </div>
+        </section>
       </aside>
 
       <main class="workspace">
@@ -234,6 +271,14 @@
             </svg>
             批量下载
           </button>
+          <button
+            id="exportResultsButton"
+            class="secondary-action"
+            type="button"
+            disabled
+            title="导出当前搜索结果为 BibTeX"
+            aria-label="导出当前搜索结果为 BibTeX"
+          >导出 BibTeX</button>
         </section>
 
         <div class="progress-track" aria-hidden="true">
@@ -250,6 +295,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=20260515-card-clamp" defer></script>
+    <script src="/app.js?v=20260524-local-inbox" defer></script>
   </body>
 </html>

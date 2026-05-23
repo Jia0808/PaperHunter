@@ -11,6 +11,7 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import RLock
 from urllib.parse import unquote, urljoin, urlparse
 
 import arxiv
@@ -21,8 +22,10 @@ ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
 DOWNLOAD_DIR = ROOT_DIR / "downloaded_papers"
 CACHE_DIR = ROOT_DIR / ".cache"
+DATA_DIR = ROOT_DIR / "data"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(exist_ok=True)
 
 HOST = "127.0.0.1"
 PORT = 8000
@@ -116,6 +119,28 @@ ACL_BIB_URL = "https://aclanthology.org/anthology+abstracts.bib.gz"
 ACL_BIB_CACHE = CACHE_DIR / "acl-anthology-abstracts.bib.gz"
 ACL_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 ACL_ENTRY_CACHE: list[dict] | None = None
+LIBRARY_PATH = DATA_DIR / "library.json"
+LIBRARY_LOCK = RLock()
+MAX_SEARCH_HISTORY = 30
+PAPER_SNAPSHOT_FIELDS = (
+    "title",
+    "authors",
+    "published",
+    "year",
+    "pdfUrl",
+    "entryUrl",
+    "pageUrl",
+    "arxivId",
+    "paperId",
+    "source",
+    "sourceLabel",
+    "venue",
+    "category",
+    "abstract",
+    "fullAbstract",
+    "downloadable",
+    "isDownloaded",
+)
 
 
 def compact_text(value: str, limit: int) -> str:
@@ -157,6 +182,36 @@ def clean_display_text(value: str, limit: int) -> str:
 
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def paper_key(paper: dict) -> str:
+    for field in ("source", "paperId", "arxivId", "title"):
+        value = str(paper.get(field, "")).strip()
+        if value and value.lower() not in {"unknown", "untitled"}:
+            break
+    else:
+        value = "unknown"
+
+    source = str(paper.get("source", "")).strip() or "paper"
+    identifier = str(paper.get("paperId") or paper.get("arxivId") or paper.get("title") or value)
+    normalized = normalize_key(f"{source} {identifier}").replace(" ", "-")
+    return normalized[:120] or "paper"
+
+
+def paper_snapshot(paper: dict) -> dict:
+    snapshot = {field: paper.get(field, "") for field in PAPER_SNAPSHOT_FIELDS}
+    snapshot["paperKey"] = paper_key(paper)
+    snapshot["title"] = clean_display_text(str(snapshot.get("title") or "Untitled"), TITLE_TEXT_LIMIT)
+    snapshot["authors"] = clean_display_text(str(snapshot.get("authors") or "Unknown authors"), AUTHOR_TEXT_LIMIT)
+    snapshot["abstract"] = clean_display_text(str(snapshot.get("abstract") or "暂无摘要。"), ABSTRACT_TEXT_LIMIT)
+    snapshot["fullAbstract"] = clean_html(str(snapshot.get("fullAbstract") or ""))
+    snapshot["downloadable"] = bool(snapshot.get("pdfUrl"))
+    snapshot["isDownloaded"] = bool(snapshot.get("isDownloaded"))
+    return snapshot
 
 
 def query_terms(query: str, min_length: int = 3) -> list[str]:
@@ -242,6 +297,7 @@ def make_paper(
 ) -> dict:
     source_label = SOURCE_LABELS.get(source, source)
     resolved_id = paper_id or normalize_key(title).replace(" ", "-")[:48] or "unknown"
+    full_abstract = clean_html(str(abstract or "暂无摘要。"))
     return {
         "title": clean_display_text(title, TITLE_TEXT_LIMIT) or "Untitled",
         "authors": clean_display_text(authors, AUTHOR_TEXT_LIMIT) or "Unknown authors",
@@ -256,7 +312,8 @@ def make_paper(
         "sourceLabel": source_label,
         "venue": clean_display_text(venue, 120),
         "category": clean_display_text(category or venue or source_label, 120),
-        "abstract": clean_display_text(abstract or "暂无摘要。", ABSTRACT_TEXT_LIMIT),
+        "abstract": compact_text(full_abstract, ABSTRACT_TEXT_LIMIT),
+        "fullAbstract": full_abstract,
         "downloadable": bool(pdf_url),
         "isDownloaded": bool(pdf_url) and (DOWNLOAD_DIR / sanitize_filename(title, resolved_id)).exists(),
     }
@@ -280,6 +337,459 @@ def build_arxiv_query(raw_query: str, categories: list[str]) -> str:
 
 def existing_pdf_count() -> int:
     return len(list(DOWNLOAD_DIR.glob("*.pdf")))
+
+
+def empty_library() -> dict:
+    return {
+        "version": 1,
+        "favorites": {},
+        "ignored": {},
+        "downloads": {},
+        "history": [],
+    }
+
+
+def load_library() -> dict:
+    with LIBRARY_LOCK:
+        if not LIBRARY_PATH.exists():
+            return empty_library()
+        try:
+            with LIBRARY_PATH.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (OSError, json.JSONDecodeError):
+            return empty_library()
+
+    library = empty_library()
+    if isinstance(data, dict):
+        for key in ("favorites", "ignored", "downloads"):
+            if isinstance(data.get(key), dict):
+                library[key] = data[key]
+        if isinstance(data.get("history"), list):
+            library["history"] = data["history"][:MAX_SEARCH_HISTORY]
+    return library
+
+
+def save_library(library: dict) -> None:
+    with LIBRARY_LOCK:
+        tmp_path = LIBRARY_PATH.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as file:
+            json.dump(library, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        tmp_path.replace(LIBRARY_PATH)
+
+
+def compact_library(library: dict) -> dict:
+    favorites = []
+    for key, item in (library.get("favorites") or {}).items():
+        if isinstance(item, dict):
+            paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+            favorites.append({
+                **paper,
+                "paperKey": key,
+                "favoritedAt": item.get("createdAt", ""),
+                "refreshedAt": item.get("refreshedAt", ""),
+            })
+
+    ignored = []
+    for key, item in (library.get("ignored") or {}).items():
+        if isinstance(item, dict):
+            paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+            ignored.append({**paper, "paperKey": key, "ignoredAt": item.get("createdAt", "")})
+
+    favorites.sort(key=lambda paper: str(paper.get("favoritedAt", "")), reverse=True)
+    ignored.sort(key=lambda paper: str(paper.get("ignoredAt", "")), reverse=True)
+    return {
+        "favorites": favorites,
+        "ignored": ignored,
+        "history": (library.get("history") or [])[:MAX_SEARCH_HISTORY],
+        "favoriteKeys": sorted((library.get("favorites") or {}).keys()),
+        "ignoredKeys": sorted((library.get("ignored") or {}).keys()),
+        "downloadKeys": sorted((library.get("downloads") or {}).keys()),
+    }
+
+
+def apply_library_state(results: list[dict], library: dict) -> tuple[list[dict], int]:
+    favorites = library.get("favorites") or {}
+    ignored = library.get("ignored") or {}
+    annotated = []
+    hidden_ignored = 0
+    for paper in results:
+        key = paper_key(paper)
+        if key in ignored:
+            hidden_ignored += 1
+            continue
+        paper["paperKey"] = key
+        paper["isFavorite"] = key in favorites
+        paper["isIgnored"] = False
+        annotated.append(paper)
+    return annotated, hidden_ignored
+
+
+def add_search_history(library: dict, payload: dict, result_count: int, source_counts: dict[str, int]) -> None:
+    query = str(payload.get("query", "")).strip()
+    if not query:
+        return
+
+    entry = {
+        "query": query,
+        "createdAt": now_iso(),
+        "resultCount": result_count,
+        "sources": get_selected_sources(payload),
+        "fieldPreset": str(payload.get("fieldPreset", "all")),
+        "intent": str(payload.get("intent", "general")),
+        "sortBy": str(payload.get("sortBy", "recent")),
+        "sourceCounts": source_counts,
+    }
+    existing = [
+        item for item in library.get("history", [])
+        if normalize_key(str(item.get("query", ""))) != normalize_key(query)
+    ]
+    library["history"] = [entry, *existing][:MAX_SEARCH_HISTORY]
+
+
+def paper_identity_values(paper: dict) -> set[str]:
+    values = set()
+    for field in ("paperId", "arxivId", "pageUrl", "entryUrl", "pdfUrl", "title"):
+        value = normalize_key(str(paper.get(field, "")))
+        if value:
+            values.add(value)
+    return values
+
+
+def same_paper(left: dict, right: dict) -> bool:
+    left_ids = paper_identity_values(left)
+    right_ids = paper_identity_values(right)
+    if left_ids & right_ids:
+        return True
+
+    left_title = normalize_key(str(left.get("title", "")))
+    right_title = normalize_key(str(right.get("title", "")))
+    return bool(left_title and right_title and left_title == right_title)
+
+
+def refresh_queries_for_paper(paper: dict) -> list[str]:
+    candidates = [
+        str(paper.get("paperId") or "").strip(),
+        str(paper.get("arxivId") or "").strip(),
+        str(paper.get("title") or "").strip(),
+    ]
+    seen = set()
+    queries = []
+    for query in candidates:
+        key = normalize_key(query)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        queries.append(query)
+    return queries
+
+
+def refresh_source_candidates(source: str, query: str) -> list[dict]:
+    limit = 8
+    if source == "arxiv":
+        return search_arxiv_source(query, ["All"], limit, "relevance")
+    if source == "semantic":
+        return search_semantic_source(query, limit)
+    if source == "cvf":
+        return search_cvf_source(query, limit)
+    if source == "acl":
+        return search_acl_source(query, limit)
+    if source == "openreview":
+        return search_openreview_source(query, limit)
+    if source == "chinarxiv":
+        return search_chinarxiv_source(query, limit)
+    if source == "sciopen":
+        return search_sciopen_source(query, limit)
+    if source == "nso":
+        return search_nso_source(query, limit)
+    return []
+
+
+def find_refreshed_paper(paper: dict) -> dict | None:
+    source = str(paper.get("source", "")).strip()
+    if source not in SOURCE_LABELS:
+        return None
+
+    for query in refresh_queries_for_paper(paper):
+        candidates = refresh_source_candidates(source, query)
+        for candidate in candidates:
+            if same_paper(paper, candidate):
+                return candidate
+    return None
+
+
+def refresh_favorite_entry(key: str, item: dict) -> tuple[str, dict | None, str]:
+    paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
+    if not paper:
+        return key, None, "缺少论文数据"
+
+    try:
+        refreshed = find_refreshed_paper(paper)
+    except Exception as exc:
+        return key, None, format_source_error(str(paper.get("source", "")), exc)
+
+    if not refreshed:
+        return key, None, "未找到匹配结果"
+
+    snapshot = paper_snapshot({**refreshed, "isDownloaded": bool(paper.get("isDownloaded")) or bool(refreshed.get("isDownloaded"))})
+    snapshot["paperKey"] = key
+    return key, snapshot, ""
+
+
+def refresh_favorites_metadata() -> dict:
+    library = load_library()
+    favorites = {
+        key: item
+        for key, item in (library.get("favorites") or {}).items()
+        if isinstance(item, dict)
+    }
+    if not favorites:
+        return {
+            "ok": True,
+            "library": compact_library(library),
+            "refreshed": 0,
+            "checked": 0,
+            "errors": {},
+        }
+
+    refreshed = {}
+    errors = {}
+    with ThreadPoolExecutor(max_workers=min(len(favorites), 3)) as executor:
+        future_to_key = {
+            executor.submit(refresh_favorite_entry, key, item): key
+            for key, item in favorites.items()
+        }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                entry_key, snapshot, error = future.result()
+            except Exception as exc:
+                errors[key] = str(exc)
+                continue
+            if snapshot:
+                refreshed[entry_key] = snapshot
+            elif error:
+                errors[key] = error
+
+    with LIBRARY_LOCK:
+        library = load_library()
+        for key, snapshot in refreshed.items():
+            item = library.get("favorites", {}).get(key)
+            if not isinstance(item, dict):
+                continue
+            item["paper"] = snapshot
+            item["refreshedAt"] = now_iso()
+        save_library(library)
+        library_view = compact_library(library)
+
+    return {
+        "ok": True,
+        "library": library_view,
+        "refreshed": len(refreshed),
+        "checked": len(favorites),
+        "errors": errors,
+    }
+
+
+def update_library(payload: dict) -> dict:
+    action = str(payload.get("action", "")).strip().lower()
+    if action == "refresh-favorites":
+        return refresh_favorites_metadata()
+
+    paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
+    key = str(payload.get("paperKey") or paper_key(paper)).strip()
+    if not key:
+        raise ValueError("缺少论文标识。")
+
+    with LIBRARY_LOCK:
+        library = load_library()
+        now = now_iso()
+        snapshot = paper_snapshot(paper) if paper else {}
+
+        if action == "favorite":
+            library["favorites"][key] = {"createdAt": now, "paper": snapshot}
+            library["ignored"].pop(key, None)
+        elif action == "unfavorite":
+            library["favorites"].pop(key, None)
+        elif action == "ignore":
+            library["ignored"][key] = {"createdAt": now, "paper": snapshot}
+            library["favorites"].pop(key, None)
+        elif action == "unignore":
+            library["ignored"].pop(key, None)
+        elif action == "clear-history":
+            library["history"] = []
+        else:
+            raise ValueError("不支持的资料库操作。")
+
+        save_library(library)
+    return {"ok": True, "library": compact_library(library)}
+
+
+def record_download(paper: dict, filename: str) -> None:
+    key = paper_key(paper)
+    snapshot = paper_snapshot({**paper, "isDownloaded": True})
+    with LIBRARY_LOCK:
+        library = load_library()
+        library["downloads"][key] = {
+            "createdAt": now_iso(),
+            "filename": filename,
+            "paper": snapshot,
+        }
+        if key in library.get("favorites", {}):
+            library["favorites"][key]["paper"] = snapshot
+        save_library(library)
+
+
+def bibtex_key(paper: dict) -> str:
+    authors = str(paper.get("authors", "")).split(",")[0].strip().split()
+    author = authors[-1] if authors else "paper"
+    year = str(paper.get("year") or paper.get("published") or "n.d.")
+    year_match = re.search(r"\d{4}", year)
+    title_terms = query_terms(str(paper.get("title", "")), min_length=4)[:2]
+    parts = [author, year_match.group(0) if year_match else "paper", *title_terms]
+    key = "".join(part[:28] for part in parts if part)
+    return re.sub(r"[^A-Za-z0-9:_-]", "", key) or "paper"
+
+
+def bibtex_entry_type(paper: dict) -> str:
+    source = str(paper.get("source", "")).lower()
+    if source in {"arxiv", "openreview", "chinarxiv"}:
+        return "misc"
+    if source in {"cvf", "acl"}:
+        return "inproceedings"
+    return "article"
+
+
+def escape_bibtex(value: object) -> str:
+    text = clean_html(str(value or ""))
+    replacements = {
+        "\\": "\\textbackslash{}",
+        "{": "\\{",
+        "}": "\\}",
+        "&": "\\&",
+        "%": "\\%",
+        "$": "\\$",
+        "#": "\\#",
+        "_": "\\_",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
+
+def paper_year_text(paper: dict) -> str:
+    year = paper_year(paper)
+    return str(year) if year else ""
+
+
+def paper_url(paper: dict) -> str:
+    return str(paper.get("pageUrl") or paper.get("entryUrl") or paper.get("pdfUrl") or "")
+
+
+def papers_from_export_payload(payload: dict) -> list[dict]:
+    scope = str(payload.get("scope", "results")).lower()
+    if scope == "favorites":
+        library = load_library()
+        return [
+            item.get("paper")
+            for item in (library.get("favorites") or {}).values()
+            if isinstance(item, dict) and isinstance(item.get("paper"), dict)
+        ]
+
+    papers = payload.get("papers") or []
+    if not isinstance(papers, list):
+        return []
+    return [paper_snapshot(paper) for paper in papers if isinstance(paper, dict)]
+
+
+def export_bibtex(papers: list[dict]) -> str:
+    entries = []
+    seen_keys: dict[str, int] = {}
+    for paper in papers:
+        key = bibtex_key(paper)
+        seen_keys[key] = seen_keys.get(key, 0) + 1
+        if seen_keys[key] > 1:
+            key = f"{key}{seen_keys[key]}"
+        entry_type = bibtex_entry_type(paper)
+        authors = str(paper.get("authors", "")).replace(", et al.", " and others").replace(", ", " and ")
+        fields = {
+            "title": paper.get("title"),
+            "author": authors,
+            "year": paper_year_text(paper),
+            "journal": (paper.get("venue") or paper.get("sourceLabel")) if entry_type == "article" else "",
+            "booktitle": paper.get("venue") if entry_type == "inproceedings" else "",
+            "howpublished": paper.get("category") if entry_type == "misc" else "",
+            "url": paper_url(paper),
+            "note": f"arXiv:{paper.get('paperId')}" if str(paper.get("source", "")) == "arxiv" else "",
+        }
+        if str(paper.get("source", "")) == "arxiv":
+            fields["eprint"] = paper.get("paperId")
+            fields["archivePrefix"] = "arXiv"
+            fields["primaryClass"] = paper.get("category")
+        elif str(paper.get("source", "")) == "openreview":
+            fields["note"] = paper.get("venue") or "OpenReview"
+        body = "\n".join(
+            f"  {field} = {{{escape_bibtex(value)}}},"
+            for field, value in fields.items()
+            if value
+        )
+        entries.append(f"@{entry_type}{{{key},\n{body}\n}}")
+    return "\n\n".join(entries)
+
+
+def export_markdown(papers: list[dict]) -> str:
+    lines = ["# PaperHunter 阅读清单", ""]
+    for index, paper in enumerate(papers, start=1):
+        title = clean_html(str(paper.get("title") or "Untitled"))
+        url = paper_url(paper)
+        heading = f"{index}. [{title}]({url})" if url else f"{index}. {title}"
+        lines.append(heading)
+        meta = " · ".join(
+            value
+            for value in (
+                clean_html(str(paper.get("authors") or "")),
+                paper_year_text(paper),
+                clean_html(str(paper.get("venue") or paper.get("sourceLabel") or "")),
+            )
+            if value
+        )
+        if meta:
+            lines.append(f"   - {meta}")
+        pdf_url = str(paper.get("pdfUrl") or "")
+        if pdf_url:
+            lines.append(f"   - PDF: {pdf_url}")
+        full_abstract = clean_html(str(paper.get("fullAbstract") or ""))
+        abstract = full_abstract or clean_html(str(paper.get("abstract") or ""))
+        if abstract:
+            suffix = "" if full_abstract else " (可能已截断)"
+            lines.append(f"   - 摘要: {abstract}{suffix}")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def export_papers(payload: dict) -> dict:
+    export_format = str(payload.get("format", "bibtex")).lower()
+    papers = papers_from_export_payload(payload)
+    if not papers:
+        raise ValueError("没有可导出的论文。")
+
+    if export_format == "markdown":
+        content = export_markdown(papers)
+        filename = "paperhunter-reading-list.md"
+        mime_type = "text/markdown; charset=utf-8"
+    elif export_format == "bibtex":
+        content = export_bibtex(papers)
+        filename = "paperhunter-library.bib"
+        mime_type = "application/x-bibtex; charset=utf-8"
+    else:
+        raise ValueError("不支持的导出格式。")
+
+    return {
+        "ok": True,
+        "format": export_format,
+        "filename": filename,
+        "mimeType": mime_type,
+        "content": content,
+        "count": len(papers),
+    }
 
 
 def search_arxiv_source(query: str, categories: list[str], max_results: int, sort_by: str) -> list[dict]:
@@ -1254,6 +1764,13 @@ def search_papers(payload: dict) -> dict:
         if per_source_requested
         else filtered_results(results, filters, sort_by, max_results)
     )
+    with LIBRARY_LOCK:
+        library = load_library()
+        final_results, hidden_ignored_count = apply_library_state(final_results, library)
+        source_counts = count_results_by_source(final_results)
+        add_search_history(library, payload, len(final_results), source_counts)
+        save_library(library)
+        library_view = compact_library(library)
 
     return {
         "query": query,
@@ -1264,9 +1781,11 @@ def search_papers(payload: dict) -> dict:
         "perSourceLimit": per_source_limit if per_source_requested else None,
         "filters": filters,
         "results": final_results,
-        "sourceCounts": count_results_by_source(final_results),
+        "sourceCounts": source_counts,
+        "hiddenIgnoredCount": hidden_ignored_count,
         "errors": errors,
         "downloadedCount": existing_pdf_count(),
+        "library": library_view,
     }
 
 
@@ -1317,6 +1836,8 @@ def download_pdf(payload: dict) -> dict:
         tmp_path.unlink(missing_ok=True)
         raise
 
+    record_download(payload, filename)
+
     return {
         "ok": True,
         "filename": filename,
@@ -1343,6 +1864,7 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.startswith("/api/status"):
+            library = load_library()
             self.send_json(
                 {
                     "ok": True,
@@ -1350,6 +1872,7 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                     "downloadDir": str(DOWNLOAD_DIR),
                     "sources": SOURCE_LABELS,
                     "externalGateways": EXTERNAL_GATEWAYS,
+                    "library": compact_library(library),
                 }
             )
             return
@@ -1367,6 +1890,12 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/download"):
                 self.send_json(download_pdf(payload))
+                return
+            if self.path.startswith("/api/library"):
+                self.send_json(update_library(payload))
+                return
+            if self.path.startswith("/api/export"):
+                self.send_json(export_papers(payload))
                 return
             self.send_json({"ok": False, "error": "接口不存在。"}, status=404)
         except ValueError as exc:
