@@ -2,6 +2,14 @@ const state = {
   results: [],
   sortBy: "recent",
   isSearching: false,
+  library: {
+    favorites: [],
+    ignored: [],
+    history: [],
+    favoriteKeys: [],
+    ignoredKeys: [],
+    downloadKeys: [],
+  },
 };
 
 const fieldPresets = {
@@ -117,6 +125,15 @@ const elements = {
   sourceSummary: document.querySelector("#sourceSummary"),
   savedCount: document.querySelector("#savedCount"),
   downloadAll: document.querySelector("#downloadAllButton"),
+  exportResults: document.querySelector("#exportResultsButton"),
+  favoriteCount: document.querySelector("#favoriteCount"),
+  ignoredCount: document.querySelector("#ignoredCount"),
+  exportFavoritesBib: document.querySelector("#exportFavoritesBibButton"),
+  exportFavoritesMarkdown: document.querySelector("#exportFavoritesMarkdownButton"),
+  refreshFavorites: document.querySelector("#refreshFavoritesButton"),
+  libraryRefreshNote: document.querySelector("#libraryRefreshNote"),
+  clearHistory: document.querySelector("#clearHistoryButton"),
+  searchHistory: document.querySelector("#searchHistory"),
   progress: document.querySelector("#progressBar"),
 };
 
@@ -284,9 +301,118 @@ function formatSourceCounts(counts = {}) {
     .join("，");
 }
 
+function normalizeLibrary(library = {}) {
+  return {
+    favorites: Array.isArray(library.favorites) ? library.favorites : [],
+    ignored: Array.isArray(library.ignored) ? library.ignored : [],
+    history: Array.isArray(library.history) ? library.history : [],
+    favoriteKeys: Array.isArray(library.favoriteKeys) ? library.favoriteKeys : [],
+    ignoredKeys: Array.isArray(library.ignoredKeys) ? library.ignoredKeys : [],
+    downloadKeys: Array.isArray(library.downloadKeys) ? library.downloadKeys : [],
+  };
+}
+
+function isFavorite(paper) {
+  return state.library.favoriteKeys.includes(paper.paperKey);
+}
+
+function annotatePaper(paper) {
+  paper.isFavorite = isFavorite(paper);
+  paper.isIgnored = state.library.ignoredKeys.includes(paper.paperKey);
+  return paper;
+}
+
+function syncResultsWithLibrary() {
+  state.results = state.results.map(annotatePaper).filter((paper) => !paper.isIgnored);
+}
+
+function renderLibrary() {
+  const favoriteCount = state.library.favorites.length;
+  const ignoredCount = state.library.ignored.length;
+  elements.favoriteCount.textContent = String(favoriteCount);
+  elements.ignoredCount.textContent = String(ignoredCount);
+  elements.exportFavoritesBib.disabled = favoriteCount === 0;
+  elements.exportFavoritesMarkdown.disabled = favoriteCount === 0;
+  elements.refreshFavorites.disabled = favoriteCount === 0;
+  elements.clearHistory.disabled = state.library.history.length === 0;
+  const staleCount = state.library.favorites.filter((paper) => !paper.fullAbstract).length;
+  elements.libraryRefreshNote.textContent = staleCount
+    ? `${staleCount} 篇收藏可能只有截断摘要，可刷新补全可获取的元数据。`
+    : "收藏元数据已包含完整摘要或来源未提供更多内容。";
+
+  elements.searchHistory.replaceChildren();
+  if (!state.library.history.length) {
+    const empty = document.createElement("span");
+    empty.className = "history-empty";
+    empty.textContent = "暂无历史";
+    elements.searchHistory.append(empty);
+    return;
+  }
+
+  state.library.history.slice(0, 6).forEach((item) => {
+    const button = document.createElement("button");
+    button.className = "history-item";
+    button.type = "button";
+    button.title = item.query || "";
+    button.addEventListener("click", () => {
+      elements.query.value = item.query || "";
+      elements.intent.value = item.intent || "general";
+      elements.fieldPreset.value = item.fieldPreset || "all";
+      state.sortBy = item.sortBy || "recent";
+      updateSortButtons();
+      applyFieldPreset();
+      renderExternalGateways();
+      elements.query.focus();
+    });
+
+    const title = document.createElement("strong");
+    title.textContent = item.query || "未命名检索";
+    const meta = document.createElement("span");
+    const sourceText = Array.isArray(item.sources) ? item.sources.map((source) => sourceLabels[source] || source).join(", ") : "";
+    meta.textContent = `${item.resultCount || 0} 篇 · ${sourceText || "默认来源"}`;
+    button.append(title, meta);
+    elements.searchHistory.append(button);
+  });
+}
+
+function updateLibrary(library) {
+  state.library = normalizeLibrary(library);
+  syncResultsWithLibrary();
+  renderLibrary();
+}
+
+function downloadTextFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType || "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.append(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
 function createPaperCard(paper, index) {
   const card = document.createElement("article");
   card.className = "paper-card";
+  card.classList.toggle("is-favorite", Boolean(paper.isFavorite));
 
   const content = document.createElement("div");
   const meta = document.createElement("div");
@@ -327,9 +453,39 @@ function createPaperCard(paper, index) {
   link.href = paper.pageUrl || paper.entryUrl || paper.pdfUrl || "#";
   link.target = "_blank";
   link.rel = "noreferrer";
-  link.textContent = `打开 ${paper.sourceLabel || "来源"}`;
+  link.textContent = "打开来源";
+  link.title = `打开 ${paper.sourceLabel || "来源"} 页面`;
+  link.setAttribute("aria-label", `打开 ${paper.sourceLabel || "来源"} 页面`);
 
-  actions.append(downloadButton, link);
+  const favoriteButton = document.createElement("button");
+  favoriteButton.className = "paper-action";
+  favoriteButton.type = "button";
+  favoriteButton.textContent = paper.isFavorite ? "取消收藏" : "收藏";
+  favoriteButton.addEventListener("click", () => toggleFavorite(index, favoriteButton));
+
+  const ignoreButton = document.createElement("button");
+  ignoreButton.className = "paper-action";
+  ignoreButton.type = "button";
+  ignoreButton.textContent = "忽略";
+  ignoreButton.addEventListener("click", () => ignorePaper(index, ignoreButton));
+
+  const copyBibButton = document.createElement("button");
+  copyBibButton.className = "paper-action";
+  copyBibButton.type = "button";
+  copyBibButton.textContent = "复制 BibTeX";
+  copyBibButton.addEventListener("click", () => copyPaperExport(index, "bibtex"));
+
+  const copyMarkdownButton = document.createElement("button");
+  copyMarkdownButton.className = "paper-action";
+  copyMarkdownButton.type = "button";
+  copyMarkdownButton.textContent = "复制 Markdown";
+  copyMarkdownButton.addEventListener("click", () => copyPaperExport(index, "markdown"));
+
+  const secondaryActions = document.createElement("div");
+  secondaryActions.className = "paper-secondary-actions";
+  secondaryActions.append(favoriteButton, ignoreButton, copyBibButton, copyMarkdownButton);
+
+  actions.append(downloadButton, link, secondaryActions);
   card.append(content, actions);
   return card;
 }
@@ -338,6 +494,7 @@ function renderResults() {
   elements.results.replaceChildren();
   elements.resultCount.textContent = String(state.results.length);
   elements.downloadAll.disabled = state.results.filter((paper) => paper.downloadable && !paper.isDownloaded).length === 0;
+  elements.exportResults.disabled = state.results.length === 0;
 
   if (state.results.length === 0) {
     const empty = document.createElement("div");
@@ -385,6 +542,124 @@ async function refreshStatus() {
   const response = await fetch("/api/status");
   const data = await response.json();
   elements.savedCount.textContent = String(data.downloadedCount || 0);
+  updateLibrary(data.library || {});
+}
+
+async function updatePaperLibrary(action, paper) {
+  const data = await requestJson("/api/library", { action, paper, paperKey: paper.paperKey });
+  updateLibrary(data.library || {});
+  return data;
+}
+
+async function toggleFavorite(index, button) {
+  const paper = state.results[index];
+  if (!paper || button.disabled) {
+    return;
+  }
+
+  const action = paper.isFavorite ? "unfavorite" : "favorite";
+  button.disabled = true;
+  try {
+    await updatePaperLibrary(action, paper);
+    setMessage(action === "favorite" ? "已加入收藏。" : "已取消收藏。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function ignorePaper(index, button) {
+  const paper = state.results[index];
+  if (!paper || button.disabled) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await updatePaperLibrary("ignore", paper);
+    setMessage("已忽略该论文，后续检索会默认隐藏。", "success");
+    renderResults();
+  } catch (error) {
+    button.disabled = false;
+    setMessage(error.message, "error");
+  }
+}
+
+async function clearHistory() {
+  try {
+    const data = await requestJson("/api/library", { action: "clear-history", paperKey: "history" });
+    updateLibrary(data.library || {});
+    setMessage("搜索历史已清空。", "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function refreshFavoritesMetadata() {
+  if (elements.refreshFavorites.disabled) {
+    return;
+  }
+
+  const originalText = elements.refreshFavorites.textContent;
+  elements.refreshFavorites.disabled = true;
+  elements.refreshFavorites.textContent = "刷新中";
+  setMessage("正在刷新收藏元数据，部分来源可能需要等待...");
+
+  try {
+    const data = await requestJson("/api/library", { action: "refresh-favorites", paperKey: "favorites" }, 60000);
+    updateLibrary(data.library || {});
+    const errorCount = data.errors ? Object.keys(data.errors).length : 0;
+    const suffix = errorCount ? `，${errorCount} 篇未匹配或来源暂时失败` : "";
+    setMessage(`已刷新 ${data.refreshed || 0}/${data.checked || 0} 篇收藏${suffix}。`, errorCount ? "" : "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    elements.refreshFavorites.textContent = originalText;
+    elements.refreshFavorites.disabled = state.library.favorites.length === 0;
+  }
+}
+
+async function exportPapers({ scope = "results", format = "bibtex", papers = state.results, download = true } = {}) {
+  const data = await requestJson("/api/export", { scope, format, papers });
+  if (download) {
+    downloadTextFile(data.filename, data.content, data.mimeType);
+  }
+  return data;
+}
+
+async function exportCurrentResults() {
+  try {
+    const data = await exportPapers({ scope: "results", format: "bibtex", papers: state.results });
+    setMessage(`已导出 ${data.count} 篇当前结果。`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function exportFavorites(format) {
+  try {
+    const data = await exportPapers({ scope: "favorites", format });
+    setMessage(`已导出 ${data.count} 篇收藏论文。`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function copyPaperExport(index, format) {
+  const paper = state.results[index];
+  if (!paper) {
+    return;
+  }
+  try {
+    const data = await exportPapers({ scope: "results", format, papers: [paper], download: false });
+    await copyText(data.content);
+    setMessage(format === "bibtex" ? "BibTeX 已复制。" : "Markdown 已复制。", "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
 }
 
 async function performSearch(event) {
@@ -428,8 +703,9 @@ async function performSearch(event) {
       venue: elements.venue.value.trim(),
       matchScope: elements.matchScope.value,
     });
-    state.results = data.results || [];
+    state.results = (data.results || []).map(annotatePaper);
     elements.savedCount.textContent = String(data.downloadedCount || 0);
+    updateLibrary(data.library || state.library);
     elements.currentQuery.textContent = query;
     updateCategorySummary();
     updateSourceSummary();
@@ -443,9 +719,10 @@ async function performSearch(event) {
       : "";
     const sourceBreakdown = formatSourceCounts(data.sourceCounts);
     const issueText = summarizeErrors(data.errors);
+    const hiddenText = data.hiddenIgnoredCount ? `已隐藏 ${data.hiddenIgnoredCount} 篇忽略论文。` : "";
     const suffix = errorCount ? `，有 ${errorCount} 个来源暂时失败。${issueText}` : "。";
     const breakdownText = sourceBreakdown ? `来源分布：${sourceBreakdown}。` : "";
-    setMessage(`找到 ${state.results.length} 篇论文${countText}。${breakdownText}${suffix}`, state.results.length ? "success" : "");
+    setMessage(`找到 ${state.results.length} 篇论文${countText}。${breakdownText}${hiddenText}${suffix}`, state.results.length ? "success" : "");
     setProgress(100);
     window.setTimeout(() => setProgress(0), 650);
   } catch (error) {
@@ -474,6 +751,7 @@ async function downloadPaper(index, button) {
     paper.isDownloaded = true;
     button.textContent = "已保存";
     elements.savedCount.textContent = String(data.downloadedCount || 0);
+    refreshStatus().catch(() => {});
     setMessage(`${data.message} ${data.filename}`, "success");
     renderResults();
   } catch (error) {
@@ -517,6 +795,7 @@ async function downloadAll() {
   }
 
   renderResults();
+  refreshStatus().catch(() => {});
   window.setTimeout(() => setProgress(0), 800);
 
   if (failed) {
@@ -565,6 +844,11 @@ elements.categoryInputs.forEach((input) => {
 elements.fieldPreset.addEventListener("change", applyFieldPreset);
 elements.form.addEventListener("submit", performSearch);
 elements.downloadAll.addEventListener("click", downloadAll);
+elements.exportResults.addEventListener("click", exportCurrentResults);
+elements.exportFavoritesBib.addEventListener("click", () => exportFavorites("bibtex"));
+elements.exportFavoritesMarkdown.addEventListener("click", () => exportFavorites("markdown"));
+elements.refreshFavorites.addEventListener("click", refreshFavoritesMetadata);
+elements.clearHistory.addEventListener("click", clearHistory);
 
 updateSortButtons();
 updateSourceSummary();

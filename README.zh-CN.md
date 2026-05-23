@@ -26,8 +26,11 @@ PaperHunter 用来帮助研究人员同时检索多个开放论文来源，通�
 - 支持研究意图、研究领域、年份范围、作者、期刊/会议、匹配范围、arXiv 分类、仅可下载结果等筛选条件。
 - 支持控制每个数据源返回篇数，避免单个大源占满结果列表。
 - 支持本地 PDF 下载和重复文件识别。
+- 支持“本地收件箱”：收藏、忽略、最近搜索和下载状态会保存到 `data/library.json`。
+- 支持把收藏论文导出为 BibTeX 或 Markdown 阅读清单；来源提供完整摘要时会优先导出完整摘要。
+- 支持刷新收藏论文元数据，用来更新旧收藏并尽量补回完整摘要。
 - 为 Google Scholar、知网、万方、X-MOL、Nature、Science 等通常需要手动浏览、登录、机构权限、付费、遵守 robots.txt 或验证码的来源提供外部入口。
-- 本地优先：下载的 PDF 保存在 `downloaded_papers/`，该目录不会提交到 Git。
+- 本地优先：下载的 PDF 保存在 `downloaded_papers/`，本地收件箱状态保存在 `data/`；两个目录都不会提交到 Git。
 - 技术栈轻量：Python 3.12、`requests`、`arxiv` 和浏览器原生前端代码。
 
 ## 支持的数据源
@@ -72,8 +75,11 @@ start_paperhunter.bat
 1. 输入研究关键词或短语。
 2. 选择研究意图、研究领域、年份范围、数据源和每个数据源返回篇数。
 3. 执行检索，查看标题、作者、年份、期刊/会议和 PDF 可用性。
-4. 下载选中的开放访问 PDF，或批量下载可下载结果。
-5. 如果来源需要登录或机构权限，使用外部入口在浏览器中继续访问。
+4. 把有用论文加入本地收件箱，或者忽略不想再看到的论文。
+5. 将收藏论文导出为 BibTeX 或 Markdown 阅读清单，便于后续引用管理和翻译。
+6. 如果旧收藏显示摘要可能被截断，可以刷新收藏元数据来尽量补回完整摘要。
+7. 下载选中的开放访问 PDF，或批量下载可下载结果。
+8. 如果来源需要登录或机构权限，使用外部入口在浏览器中继续访问。
 
 ## 项目结构
 
@@ -82,8 +88,10 @@ app.py                    Python HTTP 服务、数据源适配、筛选、下载
 web/index.html            浏览器界面结构
 web/styles.css            界面样式
 web/app.js                前端状态、筛选、API 调用
+data/                     本地收件箱状态目录，已被 Git 忽略
 downloaded_papers/        本地 PDF 输出目录，已被 Git 忽略
 docs/assets/              README 和文档图片
+tests/                    后端回归测试
 .github/workflows/ci.yml  Python 和 JavaScript 语法检查
 ```
 
@@ -91,6 +99,7 @@ docs/assets/              README 和文档图片
 
 ```bash
 python -m py_compile app.py
+python -m unittest discover -s tests
 node --check web/app.js
 ```
 

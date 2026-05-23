@@ -13,6 +13,7 @@ env/
 
 # Local runtime data
 .cache/
+data/
 downloaded_papers/
 *.pdf
 *.tmp
