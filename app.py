@@ -1010,6 +1010,64 @@ def translate_abstract(payload: dict) -> dict:
     }
 
 
+def should_translate_paper(paper: dict, force: bool = False) -> bool:
+    if force:
+        return True
+    translation = normalize_translations(paper.get("translations"), paper).get("zh")
+    return not translation or bool(translation.get("stale"))
+
+
+def batch_translate_abstracts(payload: dict) -> dict:
+    force = bool(payload.get("force", False))
+    limit = clamp_int(payload.get("limit"), default=50, minimum=1, maximum=200)
+    with LIBRARY_LOCK:
+        library = load_library()
+        favorites = [
+            item.get("paper")
+            for item in (library.get("favorites") or {}).values()
+            if isinstance(item, dict) and isinstance(item.get("paper"), dict)
+        ]
+
+    candidates = [paper for paper in favorites if should_translate_paper(paper, force)][:limit]
+    if not candidates:
+        return {
+            "ok": True,
+            "checked": len(favorites),
+            "translated": 0,
+            "skipped": len(favorites),
+            "failed": 0,
+            "errors": {},
+            "usage": {},
+            "library": compact_library(library),
+        }
+
+    translated = 0
+    errors = {}
+    total_usage: dict[str, int] = {}
+    for paper in candidates:
+        key = str(paper.get("paperKey") or paper_key(paper))
+        try:
+            result = translate_abstract({"paper": paper, "paperKey": key})
+            translated += 1
+            for usage_key, value in (result.get("usage") or {}).items():
+                if isinstance(value, int):
+                    total_usage[usage_key] = total_usage.get(usage_key, 0) + value
+        except Exception as exc:
+            errors[key] = compact_text(str(exc), 220)
+
+    library = load_library()
+    return {
+        "ok": True,
+        "checked": len(favorites),
+        "translated": translated,
+        "skipped": max(0, len(favorites) - len(candidates)),
+        "failed": len(errors),
+        "errors": errors,
+        "usage": total_usage,
+        "library": compact_library(library),
+    }
+
+
 def compact_library(library: dict) -> dict:
     favorites = []
     for key, item in (library.get("favorites") or {}).items():
@@ -1418,6 +1476,53 @@ def export_markdown(papers: list[dict]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def export_bilingual_markdown(papers: list[dict]) -> str:
+    lines = ["# PaperHunter 中英文摘要阅读清单", ""]
+    for index, paper in enumerate(papers, start=1):
+        title = clean_html(str(paper.get("title") or "Untitled"))
+        url = paper_url(paper)
+        heading = f"## {index}. [{title}]({url})" if url else f"## {index}. {title}"
+        lines.append(heading)
+        lines.append("")
+        meta = " · ".join(
+            value
+            for value in (
+                clean_html(str(paper.get("authors") or "")),
+                paper_year_text(paper),
+                clean_html(str(paper.get("venue") or paper.get("sourceLabel") or "")),
+            )
+            if value
+        )
+        if meta:
+            lines.append(f"- 元数据：{meta}")
+        pdf_url = str(paper.get("pdfUrl") or "")
+        if pdf_url:
+            lines.append(f"- PDF: {pdf_url}")
+        lines.append(f"- BibTeX Key: `{bibtex_key(paper)}`")
+        lines.append("")
+
+        english = clean_html(str(paper.get("fullAbstract") or paper.get("abstract") or ""))
+        if english:
+            lines.append("### English Abstract")
+            lines.append("")
+            lines.append(english)
+            lines.append("")
+
+        translation = normalize_translations(paper.get("translations"), paper).get("zh")
+        if translation:
+            stale = "（可能已过期）" if translation.get("stale") else ""
+            lines.append(f"### 中文摘要{stale}")
+            lines.append("")
+            lines.append(str(translation.get("text") or ""))
+            lines.append("")
+        else:
+            lines.append("### 中文摘要")
+            lines.append("")
+            lines.append("未翻译。")
+            lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
 def export_papers(payload: dict) -> dict:
     export_format = str(payload.get("format", "bibtex")).lower()
     papers = papers_from_export_payload(payload)
@@ -1427,6 +1532,10 @@ def export_papers(payload: dict) -> dict:
     if export_format == "markdown":
         content = export_markdown(papers)
         filename = "paperhunter-reading-list.md"
+        mime_type = "text/markdown; charset=utf-8"
+    elif export_format == "bilingual_markdown":
+        content = export_bilingual_markdown(papers)
+        filename = "paperhunter-bilingual-reading-list.md"
         mime_type = "text/markdown; charset=utf-8"
     elif export_format == "bibtex":
         content = export_bibtex(papers)
@@ -2565,6 +2674,9 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/translate/abstract"):
                 self.send_json(translate_abstract(payload))
+                return
+            if self.path.startswith("/api/translate/batch"):
+                self.send_json(batch_translate_abstracts(payload))
                 return
             self.send_json({"ok": False, "error": "接口不存在。"}, status=404)
         except ValueError as exc:

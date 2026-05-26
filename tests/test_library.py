@@ -339,6 +339,84 @@ class LibraryTests(unittest.TestCase):
 
         self.assertTrue(snapshot["translations"]["zh"]["stale"])
 
+    def test_bilingual_markdown_includes_english_and_chinese_abstracts(self):
+        paper = app.paper_snapshot({
+            **SAMPLE_PAPER,
+            "fullAbstract": "This is the complete English abstract.",
+            "translations": {
+                "zh": {
+                    "text": "这是完整的中文摘要。",
+                    "language": "zh",
+                    "provider": "apixin_gpt",
+                    "model": "gpt-test",
+                    "translatedAt": "2026-05-27T00:00:00+00:00",
+                    "promptVersion": app.TRANSLATION_PROMPT_VERSION,
+                    "sourceHash": app.stable_text_hash("This is the complete English abstract."),
+                }
+            },
+        })
+
+        content = app.export_bilingual_markdown([paper])
+
+        self.assertIn("# PaperHunter 中英文摘要阅读清单", content)
+        self.assertIn("### English Abstract", content)
+        self.assertIn("This is the complete English abstract.", content)
+        self.assertIn("### 中文摘要", content)
+        self.assertIn("这是完整的中文摘要。", content)
+
+    def test_batch_translate_only_missing_favorite_translations(self):
+        translated_paper = app.paper_snapshot({
+            **SAMPLE_PAPER,
+            "paperId": "2605.00001",
+            "translations": {
+                "zh": {
+                    "text": "已有译文。",
+                    "language": "zh",
+                    "provider": "apixin_gpt",
+                    "model": "gpt-test",
+                    "translatedAt": "2026-05-27T00:00:00+00:00",
+                    "promptVersion": app.TRANSLATION_PROMPT_VERSION,
+                    "sourceHash": app.stable_text_hash(SAMPLE_PAPER["abstract"]),
+                }
+            },
+        })
+        missing_paper = app.paper_snapshot({**SAMPLE_PAPER, "paperId": "2605.00002", "title": "Second Paper"})
+        translated_key = app.paper_key(translated_paper)
+        missing_key = app.paper_key(missing_paper)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_path = Path(tmpdir) / "library.json"
+            settings_path = Path(tmpdir) / "settings.json"
+            with patch.object(app, "LIBRARY_PATH", library_path), patch.object(app, "SETTINGS_PATH", settings_path):
+                app.save_settings(app.normalize_settings({
+                    "provider": "apixin_gpt",
+                    "apiType": "responses",
+                    "baseUrl": "https://example.test",
+                    "endpoint": "/v1/responses",
+                    "model": "gpt-test",
+                    "apiKey": "sk-test",
+                }))
+                app.save_library({
+                    "version": app.LIBRARY_SCHEMA_VERSION,
+                    "papers": {},
+                    "favorites": {
+                        translated_key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": translated_paper},
+                        missing_key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": missing_paper},
+                    },
+                    "ignored": {},
+                    "downloads": {},
+                    "history": [],
+                })
+                with patch.object(app, "invoke_model_text", return_value=("新译文。", {"total_tokens": 10})) as invoke:
+                    response = app.batch_translate_abstracts({})
+                stored = app.load_library()
+
+        self.assertEqual(1, response["translated"])
+        self.assertEqual(1, response["skipped"])
+        self.assertEqual(1, invoke.call_count)
+        self.assertEqual("已有译文。", stored["favorites"][translated_key]["paper"]["translations"]["zh"]["text"])
+        self.assertEqual("新译文。", stored["favorites"][missing_key]["paper"]["translations"]["zh"]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

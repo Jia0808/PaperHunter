@@ -135,6 +135,8 @@ const elements = {
   ignoredCount: document.querySelector("#ignoredCount"),
   exportFavoritesBib: document.querySelector("#exportFavoritesBibButton"),
   exportFavoritesMarkdown: document.querySelector("#exportFavoritesMarkdownButton"),
+  exportFavoritesBilingual: document.querySelector("#exportFavoritesBilingualButton"),
+  batchTranslate: document.querySelector("#batchTranslateButton"),
   refreshFavorites: document.querySelector("#refreshFavoritesButton"),
   libraryRefreshNote: document.querySelector("#libraryRefreshNote"),
   clearHistory: document.querySelector("#clearHistoryButton"),
@@ -552,6 +554,8 @@ function renderLibrary() {
   elements.ignoredCount.textContent = String(ignoredCount);
   elements.exportFavoritesBib.disabled = favoriteCount === 0;
   elements.exportFavoritesMarkdown.disabled = favoriteCount === 0;
+  elements.exportFavoritesBilingual.disabled = favoriteCount === 0;
+  elements.batchTranslate.disabled = favoriteCount === 0;
   elements.refreshFavorites.disabled = favoriteCount === 0;
   elements.clearHistory.disabled = state.library.history.length === 0;
   const staleCount = state.library.favorites.filter((paper) => !paper.fullAbstract).length;
@@ -1012,6 +1016,28 @@ async function exportFavorites(format) {
   }
 }
 
+async function batchTranslateFavorites() {
+  const originalText = elements.batchTranslate.textContent;
+  elements.batchTranslate.disabled = true;
+  elements.batchTranslate.textContent = "翻译中";
+  setMessage("正在批量翻译收藏摘要，只处理未翻译或可能过期的条目...");
+  try {
+    const data = await requestJson("/api/translate/batch", { scope: "favorites" }, 180000);
+    updateLibrary(data.library || state.library);
+    const usageText = data.usage && Object.keys(data.usage).length
+      ? ` Usage: ${JSON.stringify(data.usage)}`
+      : "";
+    const failedText = data.failed ? `，${data.failed} 篇失败` : "";
+    setMessage(`批量翻译完成：已翻译 ${data.translated || 0} 篇，跳过 ${data.skipped || 0} 篇${failedText}。${usageText}`, data.failed ? "" : "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    elements.batchTranslate.textContent = originalText;
+    elements.batchTranslate.disabled = state.library.favorites.length === 0;
+  }
+}
+
 async function copyPaperExport(index, format) {
   const paper = state.results[index];
   if (!paper) {
@@ -1211,6 +1237,8 @@ elements.downloadAll.addEventListener("click", downloadAll);
 elements.exportResults.addEventListener("click", exportCurrentResults);
 elements.exportFavoritesBib.addEventListener("click", () => exportFavorites("bibtex"));
 elements.exportFavoritesMarkdown.addEventListener("click", () => exportFavorites("markdown"));
+elements.exportFavoritesBilingual.addEventListener("click", () => exportFavorites("bilingual_markdown"));
+elements.batchTranslate.addEventListener("click", batchTranslateFavorites);
 elements.refreshFavorites.addEventListener("click", refreshFavoritesMetadata);
 elements.clearHistory.addEventListener("click", clearHistory);
 elements.modelApiType.addEventListener("change", () => {
