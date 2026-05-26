@@ -525,6 +525,7 @@ function createLibraryItem(paper, view) {
     actions.append(
       createLibraryAction("下载", () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
       createLibraryAction(translation ? "重译摘要" : "翻译摘要", () => translateLibraryPaper(paper)),
+      createLibraryAction("全文翻译", () => translateFulltextPaper(paper), !paper.isDownloaded),
       createLibraryAction("BibTeX", () => copyLibraryPaperExport(paper, "bibtex")),
       createLibraryAction("Markdown", () => copyLibraryPaperExport(paper, "markdown")),
       createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
@@ -994,6 +995,20 @@ async function translateLibraryPaper(paper) {
 
 async function translateResultPaper(index, button) {
   await translatePaper(state.results[index], button);
+}
+
+async function translateFulltextPaper(paper) {
+  setMessage("正在进行全文翻译实验处理，可能需要较长时间...");
+  try {
+    const data = await requestJson("/api/translate/fulltext", { paper, paperKey: paper.paperKey }, 240000);
+    updateLibrary(data.library || state.library);
+    const usageText = data.usage && Object.keys(data.usage).length
+      ? ` Usage: ${JSON.stringify(data.usage)}`
+      : "";
+    setMessage(`全文翻译已输出：${data.file}，共 ${data.chunks} 个片段。${usageText}`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
 }
 
 async function updatePaperMetadata(paper, updates, button) {

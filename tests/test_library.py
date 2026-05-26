@@ -514,6 +514,60 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(restored_pdf)
         self.assertTrue(restored_md)
 
+    def test_fulltext_translation_writes_markdown_and_index(self):
+        paper = app.paper_snapshot({**SAMPLE_PAPER, "paperId": "fulltext-1", "isDownloaded": True})
+        key = app.paper_key(paper)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            library_path = root / "library.json"
+            settings_path = root / "settings.json"
+            download_dir = root / "downloaded_papers"
+            translated_dir = root / "translated_papers"
+            download_dir.mkdir()
+            translated_dir.mkdir()
+            filename = app.sanitize_filename(paper["title"], paper["paperId"])
+            (download_dir / filename).write_bytes(b"%PDF test")
+            with (
+                patch.object(app, "LIBRARY_PATH", library_path),
+                patch.object(app, "SETTINGS_PATH", settings_path),
+                patch.object(app, "DOWNLOAD_DIR", download_dir),
+                patch.object(app, "TRANSLATED_DIR", translated_dir),
+            ):
+                app.save_settings(app.normalize_settings({
+                    "provider": "apixin_gpt",
+                    "apiType": "responses",
+                    "baseUrl": "https://example.test",
+                    "endpoint": "/v1/responses",
+                    "model": "gpt-test",
+                    "apiKey": "sk-test",
+                }))
+                app.save_library({
+                    "version": app.LIBRARY_SCHEMA_VERSION,
+                    "papers": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": paper}},
+                    "favorites": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": paper}},
+                    "ignored": {},
+                    "downloads": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "filename": filename, "paper": paper}},
+                    "history": [],
+                })
+                with (
+                    patch.object(app, "extract_pdf_text", return_value="First paragraph. Second paragraph."),
+                    patch.object(app, "invoke_model_text", return_value=("第一段。第二段。", {"total_tokens": 20})),
+                ):
+                    response = app.translate_fulltext({"paper": paper, "paperKey": key})
+                stored = app.load_library()
+                output_path = translated_dir / response["filename"]
+                output_exists = output_path.exists()
+                content = output_path.read_text(encoding="utf-8")
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(output_exists)
+        self.assertIn("### English", content)
+        self.assertIn("### 中文", content)
+        self.assertIn("第一段。第二段。", content)
+        index = stored["favorites"][key]["paper"]["fulltextTranslations"][0]
+        self.assertEqual("fulltext", index["type"])
+        self.assertTrue(index["file"].endswith(".bilingual.md"))
+
 
 if __name__ == "__main__":
     unittest.main()

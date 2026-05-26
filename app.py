@@ -221,6 +221,7 @@ PAPER_SNAPSHOT_FIELDS = (
     "note",
     "tags",
     "translations",
+    "fulltextTranslations",
 )
 
 
@@ -337,6 +338,8 @@ def paper_snapshot(paper: dict) -> dict:
         snapshot["translations"] = {}
     else:
         snapshot["translations"] = normalize_translations(snapshot["translations"], snapshot)
+    if not isinstance(snapshot.get("fulltextTranslations"), list):
+        snapshot["fulltextTranslations"] = []
     snapshot["note"] = clean_display_text(str(snapshot.get("note") or ""), 1000)
     return snapshot
 
@@ -1077,6 +1080,175 @@ def batch_translate_abstracts(payload: dict) -> dict:
         "errors": errors,
         "usage": total_usage,
         "library": compact_library(library),
+    }
+
+
+def find_download_record(library: dict, key: str, paper: dict) -> tuple[str, Path]:
+    item = (library.get("downloads") or {}).get(key)
+    filename = str((item or {}).get("filename") or "")
+    if not filename:
+        title = str(paper.get("title") or "")
+        paper_id = str(paper.get("paperId") or paper.get("arxivId") or "")
+        filename = sanitize_filename(title, paper_id)
+    path = (DOWNLOAD_DIR / filename).resolve()
+    if DOWNLOAD_DIR.resolve() not in path.parents and path != DOWNLOAD_DIR.resolve():
+        raise ValueError("下载文件路径不安全。")
+    if not path.exists():
+        raise ValueError("未找到已下载 PDF，请先下载这篇论文。")
+    return filename, path
+
+
+def extract_pdf_text(pdf_path: Path, max_pages: int = 12) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("全文翻译需要安装 pypdf，请先运行 pip install -r requirements.txt。") from exc
+
+    reader = PdfReader(str(pdf_path))
+    chunks = []
+    for page in reader.pages[:max_pages]:
+        text = page.extract_text() or ""
+        if text.strip():
+            chunks.append(clean_html(text))
+    extracted = "\n\n".join(chunks).strip()
+    if not extracted:
+        raise RuntimeError("无法从 PDF 中提取正文文本。")
+    return extracted
+
+
+def split_text_chunks(text: str, size: int = 3200) -> list[str]:
+    normalized = clean_html(text)
+    chunks = []
+    while normalized:
+        chunk = normalized[:size]
+        cut = max(chunk.rfind("\n"), chunk.rfind(". "), chunk.rfind("。"))
+        if cut > size * 0.45:
+            chunk = chunk[: cut + 1]
+        chunks.append(chunk.strip())
+        normalized = normalized[len(chunk):].strip()
+    return [chunk for chunk in chunks if chunk]
+
+
+def fulltext_translation_prompt(title: str, chunk: str, index: int, total: int) -> str:
+    return (
+        "你是严谨的学术论文全文翻译助手。请把下面论文正文片段翻译为简体中文。\n"
+        "要求：保留公式、变量、引用编号和专有名词；不要添加原文没有的信息；只输出中文译文。\n\n"
+        f"论文标题：{title}\n"
+        f"片段：{index}/{total}\n\n"
+        f"英文正文片段：\n{chunk}"
+    )
+
+
+def write_fulltext_markdown(paper: dict, filename: str, chunks: list[str], translations: list[str]) -> Path:
+    key = paper_key(paper)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-") or "paper"
+    output_path = (TRANSLATED_DIR / f"{safe_name}.bilingual.md").resolve()
+    if TRANSLATED_DIR.resolve() not in output_path.parents and output_path != TRANSLATED_DIR.resolve():
+        raise ValueError("全文翻译输出路径不安全。")
+    TRANSLATED_DIR.mkdir(exist_ok=True)
+    lines = [
+        f"# {clean_html(str(paper.get('title') or 'Untitled'))}",
+        "",
+        "> PaperHunter 全文翻译实验输出。该功能不承诺 PDF 版式还原。",
+        "",
+        f"- 来源 PDF: `{filename}`",
+        f"- 翻译时间: {now_iso()}",
+        "",
+    ]
+    for index, (source, translated) in enumerate(zip(chunks, translations), start=1):
+        lines.extend([
+            f"## 片段 {index}",
+            "",
+            "### English",
+            "",
+            source,
+            "",
+            "### 中文",
+            "",
+            translated,
+            "",
+        ])
+    output_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+    return output_path
+
+
+def translated_relative_path(path: Path) -> str:
+    try:
+        return path.relative_to(ROOT_DIR).as_posix()
+    except ValueError:
+        return f"translated_papers/{path.relative_to(TRANSLATED_DIR).as_posix()}"
+
+
+def update_fulltext_translation_index(library: dict, key: str, paper: dict, output_path: Path, model: str) -> None:
+    existing = (
+        library.get("papers", {}).get(key)
+        or library.get("favorites", {}).get(key)
+        or library.get("downloads", {}).get(key)
+        or {}
+    )
+    base_paper = existing.get("paper") if isinstance(existing.get("paper"), dict) else paper
+    snapshot = paper_snapshot({**base_paper, **paper})
+    fulltext = snapshot.get("fulltextTranslations")
+    if not isinstance(fulltext, list):
+        fulltext = []
+    relative = translated_relative_path(output_path)
+    fulltext.append({
+        "type": "fulltext",
+        "language": "zh",
+        "format": "markdown",
+        "file": relative,
+        "model": model,
+        "createdAt": now_iso(),
+    })
+    snapshot["fulltextTranslations"] = fulltext
+    now = now_iso()
+    library["papers"][key] = {"createdAt": existing.get("createdAt", now), "updatedAt": now, "paper": snapshot}
+    for section in ("favorites", "ignored"):
+        if key in library.get(section, {}):
+            library[section][key]["paper"] = snapshot
+            library[section][key]["updatedAt"] = now
+
+
+def translate_fulltext(payload: dict) -> dict:
+    paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
+    if not paper:
+        raise ValueError("缺少论文数据。")
+    settings = load_settings()
+    if not settings.get("baseUrl") or not settings.get("model") or not settings.get("apiKey"):
+        raise ValueError("请先在模型设置中配置 Base URL、Model 和 API Key。")
+
+    key = str(payload.get("paperKey") or paper.get("paperKey") or paper_key(paper)).strip()
+    with LIBRARY_LOCK:
+        library = load_library()
+        filename, pdf_path = find_download_record(library, key, paper)
+
+    text = extract_pdf_text(pdf_path, max_pages=clamp_int(payload.get("maxPages"), 12, 1, 30))
+    chunks = split_text_chunks(text)[: clamp_int(payload.get("maxChunks"), 8, 1, 30)]
+    translations = []
+    total_usage: dict[str, int] = {}
+    title = clean_html(str(paper.get("title") or "Untitled"))
+    for index, chunk in enumerate(chunks, start=1):
+        translated, usage = invoke_model_text(settings, fulltext_translation_prompt(title, chunk, index, len(chunks)), max_tokens=1800)
+        translations.append(translated)
+        for usage_key, value in usage.items():
+            if isinstance(value, int):
+                total_usage[usage_key] = total_usage.get(usage_key, 0) + value
+
+    output_path = write_fulltext_markdown(paper, filename, chunks, translations)
+    with LIBRARY_LOCK:
+        library = load_library()
+        update_fulltext_translation_index(library, key, paper, output_path, settings.get("model", ""))
+        save_library(library)
+        library_view = compact_library(library)
+
+    return {
+        "ok": True,
+        "paperKey": key,
+        "filename": output_path.name,
+        "file": translated_relative_path(output_path),
+        "chunks": len(chunks),
+        "usage": total_usage,
+        "library": library_view,
     }
 
 
@@ -2845,6 +3017,9 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/translate/batch"):
                 self.send_json(batch_translate_abstracts(payload))
+                return
+            if self.path.startswith("/api/translate/fulltext"):
+                self.send_json(translate_fulltext(payload))
                 return
             if self.path.startswith("/api/backup/export"):
                 self.send_json(export_backup_payload())
