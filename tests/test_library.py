@@ -1,5 +1,8 @@
 import tempfile
 import unittest
+import io
+import json
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -440,6 +443,76 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual("Important for translation workflow.", paper["note"])
         self.assertEqual(["llm", "education"], paper["tags"])
         self.assertEqual(["llm", "education"], stored["papers"][key]["paper"]["tags"])
+
+    def test_workspace_backup_removes_api_key(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            library_path = root / "library.json"
+            settings_path = root / "settings.json"
+            download_dir = root / "downloaded_papers"
+            translated_dir = root / "translated_papers"
+            download_dir.mkdir()
+            translated_dir.mkdir()
+            (download_dir / "paper.pdf").write_bytes(b"%PDF test")
+            (translated_dir / "paper.zh.md").write_text("中文译文", encoding="utf-8")
+            with (
+                patch.object(app, "LIBRARY_PATH", library_path),
+                patch.object(app, "SETTINGS_PATH", settings_path),
+                patch.object(app, "DOWNLOAD_DIR", download_dir),
+                patch.object(app, "TRANSLATED_DIR", translated_dir),
+            ):
+                app.save_library(app.empty_library())
+                app.save_settings(app.normalize_settings({"apiKey": "sk-secret", "model": "gpt-test"}))
+                content, filename = app.export_workspace_backup()
+
+        self.assertTrue(filename.endswith(".zip"))
+        with zipfile.ZipFile(io.BytesIO(content), "r") as zip_file:
+            settings = json.loads(zip_file.read("data/settings.json").decode("utf-8"))
+            names = zip_file.namelist()
+        self.assertEqual("", settings["apiKey"])
+        self.assertTrue(settings["apiKeyRemoved"])
+        self.assertIn("downloaded_papers/paper.pdf", names)
+        self.assertIn("translated_papers/paper.zh.md", names)
+
+    def test_backup_import_rejects_path_traversal(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zip_file:
+            zip_file.writestr("paperhunter-backup.json", json.dumps({"app": "PaperHunter", "version": 1}))
+            zip_file.writestr("../evil.txt", "bad")
+
+        with self.assertRaises(ValueError):
+            app.extract_backup_zip(buffer.getvalue())
+
+    def test_backup_import_restores_workspace_files_without_api_key(self):
+        buffer = io.BytesIO()
+        library = app.empty_library()
+        settings = app.normalize_settings({"apiKey": "sk-should-not-restore", "model": "gpt-test"})
+        settings["apiKey"] = ""
+        with zipfile.ZipFile(buffer, "w") as zip_file:
+            zip_file.writestr("paperhunter-backup.json", json.dumps({"app": "PaperHunter", "version": 1}))
+            zip_file.writestr("data/library.json", json.dumps(library))
+            zip_file.writestr("data/settings.json", json.dumps(settings))
+            zip_file.writestr("downloaded_papers/a.pdf", b"%PDF test")
+            zip_file.writestr("translated_papers/a.zh.md", "译文")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with (
+                patch.object(app, "LIBRARY_PATH", root / "library.json"),
+                patch.object(app, "SETTINGS_PATH", root / "settings.json"),
+                patch.object(app, "DOWNLOAD_DIR", root / "downloaded_papers"),
+                patch.object(app, "TRANSLATED_DIR", root / "translated_papers"),
+            ):
+                imported = app.extract_backup_zip(buffer.getvalue())
+                restored_settings = app.load_settings()
+                restored_pdf = (root / "downloaded_papers" / "a.pdf").exists()
+                restored_md = (root / "translated_papers" / "a.zh.md").exists()
+
+        self.assertTrue(imported["library"])
+        self.assertTrue(imported["settings"])
+        self.assertEqual("", restored_settings["apiKey"])
+        self.assertTrue(restored_pdf)
+        self.assertTrue(restored_md)
 
 
 if __name__ == "__main__":

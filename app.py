@@ -1,11 +1,14 @@
 import gzip
 import hashlib
+import io
 import json
 import mimetypes
 import re
 import sys
 import time
 import xml.etree.ElementTree as ET
+import zipfile
+import base64
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -22,9 +25,11 @@ import requests
 ROOT_DIR = Path(__file__).resolve().parent
 WEB_DIR = ROOT_DIR / "web"
 DOWNLOAD_DIR = ROOT_DIR / "downloaded_papers"
+TRANSLATED_DIR = ROOT_DIR / "translated_papers"
 CACHE_DIR = ROOT_DIR / ".cache"
 DATA_DIR = ROOT_DIR / "data"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
+TRANSLATED_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -722,6 +727,13 @@ def save_model_settings(payload: dict) -> dict:
         "apiTypes": API_TYPE_ENDPOINTS,
         "settings": public_settings(settings),
     }
+
+
+def settings_without_api_key(settings: dict) -> dict:
+    cleaned = settings.copy()
+    cleaned["apiKey"] = ""
+    cleaned["apiKeyRemoved"] = True
+    return cleaned
 
 
 def extract_responses_text(data: dict) -> str:
@@ -2633,6 +2645,137 @@ def download_pdf(payload: dict) -> dict:
     }
 
 
+def backup_manifest() -> dict:
+    return {
+        "app": "PaperHunter",
+        "version": 1,
+        "createdAt": now_iso(),
+        "librarySchemaVersion": LIBRARY_SCHEMA_VERSION,
+        "settingsSchemaVersion": SETTINGS_SCHEMA_VERSION,
+        "includes": ["data/library.json", "data/settings.json", "downloaded_papers/", "translated_papers/"],
+        "apiKeyExported": False,
+    }
+
+
+def add_file_to_zip(zip_file: zipfile.ZipFile, path: Path, arcname: str) -> None:
+    if path.exists() and path.is_file():
+        zip_file.write(path, arcname)
+
+
+def add_dir_to_zip(zip_file: zipfile.ZipFile, directory: Path, prefix: str) -> None:
+    if not directory.exists():
+        return
+    for path in directory.rglob("*"):
+        if path.is_file():
+            arcname = f"{prefix}/{path.relative_to(directory).as_posix()}"
+            zip_file.write(path, arcname)
+
+
+def export_workspace_backup() -> tuple[bytes, str]:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("paperhunter-backup.json", json.dumps(backup_manifest(), ensure_ascii=False, indent=2))
+        zip_file.writestr("data/library.json", json.dumps(load_library(), ensure_ascii=False, indent=2))
+        zip_file.writestr("data/settings.json", json.dumps(settings_without_api_key(load_settings()), ensure_ascii=False, indent=2))
+        add_dir_to_zip(zip_file, DOWNLOAD_DIR, "downloaded_papers")
+        add_dir_to_zip(zip_file, TRANSLATED_DIR, "translated_papers")
+    filename = f"paperhunter-workspace-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    return buffer.getvalue(), filename
+
+
+def safe_backup_member(name: str) -> bool:
+    path = Path(name)
+    if path.is_absolute() or ".." in path.parts:
+        return False
+    allowed_roots = {"paperhunter-backup.json", "data", "downloaded_papers", "translated_papers"}
+    return bool(path.parts and path.parts[0] in allowed_roots)
+
+
+def extract_backup_zip(zip_bytes: bytes, strategy: str = "merge") -> dict:
+    strategy = strategy if strategy in {"merge", "overwrite", "skip"} else "merge"
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zip_file:
+        names = zip_file.namelist()
+        if "paperhunter-backup.json" not in names:
+            raise ValueError("不是 PaperHunter 备份包。")
+        if any(not safe_backup_member(name) for name in names):
+            raise ValueError("备份包包含不安全路径，已拒绝导入。")
+        manifest = json.loads(zip_file.read("paperhunter-backup.json").decode("utf-8"))
+        if not isinstance(manifest, dict) or manifest.get("app") != "PaperHunter":
+            raise ValueError("备份包 manifest 不正确。")
+
+        imported = {"library": False, "settings": False, "downloaded": 0, "translated": 0}
+        if "data/library.json" in names and strategy != "skip":
+            backup_library = migrate_library(json.loads(zip_file.read("data/library.json").decode("utf-8")))
+            if strategy == "overwrite":
+                save_library(backup_library)
+            else:
+                current = load_library()
+                for section in ("papers", "favorites", "ignored", "downloads"):
+                    current.setdefault(section, {}).update(backup_library.get(section, {}))
+                current["history"] = (backup_library.get("history") or []) + (current.get("history") or [])
+                current["history"] = current["history"][:MAX_SEARCH_HISTORY]
+                save_library(current)
+            imported["library"] = True
+
+        if "data/settings.json" in names and strategy != "skip":
+            backup_settings = normalize_settings(json.loads(zip_file.read("data/settings.json").decode("utf-8")))
+            backup_settings["apiKey"] = ""
+            save_settings(backup_settings)
+            imported["settings"] = True
+
+        for name in names:
+            if name.endswith("/") or name in {"paperhunter-backup.json", "data/library.json", "data/settings.json"}:
+                continue
+            target_root = None
+            if name.startswith("downloaded_papers/"):
+                target_root = DOWNLOAD_DIR
+                counter = "downloaded"
+            elif name.startswith("translated_papers/"):
+                target_root = TRANSLATED_DIR
+                counter = "translated"
+            else:
+                continue
+            relative = Path(*Path(name).parts[1:])
+            target = (target_root / relative).resolve()
+            if target_root.resolve() not in target.parents and target != target_root.resolve():
+                raise ValueError("备份包路径校验失败。")
+            if target.exists() and strategy == "skip":
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as file:
+                file.write(zip_file.read(name))
+            imported[counter] += 1
+    return imported
+
+
+def export_backup_payload() -> dict:
+    content, filename = export_workspace_backup()
+    return {
+        "ok": True,
+        "filename": filename,
+        "mimeType": "application/zip",
+        "contentBase64": base64.b64encode(content).decode("ascii"),
+        "size": len(content),
+    }
+
+
+def import_backup_payload(payload: dict) -> dict:
+    encoded = str(payload.get("contentBase64") or "")
+    if not encoded:
+        raise ValueError("缺少备份包内容。")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise ValueError("备份包不是有效的 base64 内容。") from exc
+    imported = extract_backup_zip(content, str(payload.get("strategy") or "merge"))
+    return {
+        "ok": True,
+        "imported": imported,
+        "library": compact_library(load_library()),
+        "settings": public_settings(load_settings()),
+    }
+
+
 class PaperHunterHandler(SimpleHTTPRequestHandler):
     server_version = "PaperHunter/1.0"
 
@@ -2702,6 +2845,12 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/translate/batch"):
                 self.send_json(batch_translate_abstracts(payload))
+                return
+            if self.path.startswith("/api/backup/export"):
+                self.send_json(export_backup_payload())
+                return
+            if self.path.startswith("/api/backup/import"):
+                self.send_json(import_backup_payload(payload))
                 return
             self.send_json({"ok": False, "error": "接口不存在。"}, status=404)
         except ValueError as exc:

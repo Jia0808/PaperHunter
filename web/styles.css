@@ -454,7 +454,8 @@ input[type="range"] {
   background: #ffffff;
 }
 
-.model-panel {
+.model-panel,
+.backup-panel {
   display: grid;
   gap: 0.8rem;
   margin-top: 1rem;
@@ -606,6 +607,18 @@ input[type="range"] {
 #modelTestNote {
   margin: 0;
   line-height: 1.45;
+}
+
+.file-action {
+  position: relative;
+  overflow: hidden;
+}
+
+.file-action input {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  opacity: 0;
 }
 
 .text-action {

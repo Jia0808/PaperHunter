@@ -160,6 +160,8 @@ const elements = {
   testModel: document.querySelector("#testModelButton"),
   saveModel: document.querySelector("#saveModelButton"),
   modelTestNote: document.querySelector("#modelTestNote"),
+  exportBackup: document.querySelector("#exportBackupButton"),
+  importBackup: document.querySelector("#importBackupInput"),
   libraryTabs: document.querySelectorAll("[data-library-view]"),
   libraryItems: document.querySelector("#libraryItems"),
   searchHistory: document.querySelector("#searchHistory"),
@@ -667,6 +669,31 @@ function downloadTextFile(filename, content, mimeType) {
   URL.revokeObjectURL(url);
 }
 
+function downloadBinaryFile(filename, base64Content, mimeType) {
+  const bytes = Uint8Array.from(atob(base64Content), (char) => char.charCodeAt(0));
+  const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",").pop() : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
+    reader.readAsDataURL(file);
+  });
+}
+
 async function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) {
     await navigator.clipboard.writeText(text);
@@ -1110,6 +1137,42 @@ async function batchTranslateFavorites() {
   }
 }
 
+async function exportWorkspaceBackup() {
+  const originalText = elements.exportBackup.textContent;
+  elements.exportBackup.disabled = true;
+  elements.exportBackup.textContent = "导出中";
+  try {
+    const data = await requestJson("/api/backup/export", {}, 60000);
+    downloadBinaryFile(data.filename, data.contentBase64, data.mimeType);
+    setMessage(`已导出全量备份：${data.filename}`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    elements.exportBackup.disabled = false;
+    elements.exportBackup.textContent = originalText;
+  }
+}
+
+async function importWorkspaceBackup(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) {
+    return;
+  }
+  setMessage("正在导入备份...");
+  try {
+    const contentBase64 = await fileToBase64(file);
+    const data = await requestJson("/api/backup/import", { contentBase64, strategy: "merge" }, 120000);
+    updateLibrary(data.library || state.library);
+    updateModelConfig({ settings: data.settings || state.modelSettings });
+    setMessage("备份已导入。API Key 不会从备份恢复，请按需重新填写。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    event.target.value = "";
+  }
+}
+
 async function copyPaperExport(index, format) {
   const paper = state.results[index];
   if (!paper) {
@@ -1321,6 +1384,8 @@ elements.modelBaseUrl.addEventListener("input", updateModelPreview);
 elements.modelEndpoint.addEventListener("input", updateModelPreview);
 elements.saveModel.addEventListener("click", saveModelSettings);
 elements.testModel.addEventListener("click", testModelConnection);
+elements.exportBackup.addEventListener("click", exportWorkspaceBackup);
+elements.importBackup.addEventListener("change", importWorkspaceBackup);
 elements.libraryTabs.forEach((button) => {
   button.addEventListener("click", () => {
     state.libraryView = button.dataset.libraryView || "favorites";
