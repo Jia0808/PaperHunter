@@ -2,6 +2,7 @@ const state = {
   results: [],
   sortBy: "recent",
   isSearching: false,
+  libraryView: "favorites",
   library: {
     favorites: [],
     ignored: [],
@@ -133,6 +134,8 @@ const elements = {
   refreshFavorites: document.querySelector("#refreshFavoritesButton"),
   libraryRefreshNote: document.querySelector("#libraryRefreshNote"),
   clearHistory: document.querySelector("#clearHistoryButton"),
+  libraryTabs: document.querySelectorAll("[data-library-view]"),
+  libraryItems: document.querySelector("#libraryItems"),
   searchHistory: document.querySelector("#searchHistory"),
   progress: document.querySelector("#progressBar"),
 };
@@ -301,6 +304,18 @@ function formatSourceCounts(counts = {}) {
     .join("，");
 }
 
+function paperUrl(paper) {
+  return paper.pageUrl || paper.entryUrl || paper.pdfUrl || "#";
+}
+
+function paperDisplayMeta(paper) {
+  return [
+    paper.sourceLabel || sourceLabels[paper.source] || "Source",
+    paper.year || paper.published || "",
+    paper.venue || paper.category || "",
+  ].filter(Boolean).join(" · ");
+}
+
 function normalizeLibrary(library = {}) {
   return {
     favorites: Array.isArray(library.favorites) ? library.favorites : [],
@@ -326,6 +341,81 @@ function syncResultsWithLibrary() {
   state.results = state.results.map(annotatePaper).filter((paper) => !paper.isIgnored);
 }
 
+function createLibraryAction(label, handler, disabled = false) {
+  const button = document.createElement("button");
+  button.className = "library-item-action";
+  button.type = "button";
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function createLibraryItem(paper, view) {
+  const item = document.createElement("article");
+  item.className = "library-item";
+
+  const header = document.createElement("div");
+  header.className = "library-item-header";
+
+  const title = document.createElement("strong");
+  title.textContent = paper.title || "Untitled";
+  title.title = paper.title || "";
+
+  const meta = document.createElement("span");
+  meta.textContent = paperDisplayMeta(paper);
+  header.append(title, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "library-item-actions";
+
+  const openLink = document.createElement("a");
+  openLink.className = "library-item-action";
+  openLink.href = paperUrl(paper);
+  openLink.target = "_blank";
+  openLink.rel = "noreferrer";
+  openLink.textContent = "来源";
+  openLink.title = "打开来源页面";
+
+  actions.append(openLink);
+
+  if (view === "favorites") {
+    actions.append(
+      createLibraryAction("下载", () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
+      createLibraryAction("BibTeX", () => copyLibraryPaperExport(paper, "bibtex")),
+      createLibraryAction("Markdown", () => copyLibraryPaperExport(paper, "markdown")),
+      createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
+    );
+  } else {
+    actions.append(createLibraryAction("恢复", () => updateLibraryPaperFromPanel("unignore", paper)));
+  }
+
+  item.append(header, actions);
+  return item;
+}
+
+function renderLibraryItems() {
+  elements.libraryTabs.forEach((button) => {
+    const isActive = button.dataset.libraryView === state.libraryView;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+
+  elements.libraryItems.replaceChildren();
+  const items = state.libraryView === "ignored" ? state.library.ignored : state.library.favorites;
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.className = "history-empty";
+    empty.textContent = state.libraryView === "ignored" ? "暂无忽略论文" : "暂无收藏论文";
+    elements.libraryItems.append(empty);
+    return;
+  }
+
+  items.forEach((paper) => {
+    elements.libraryItems.append(createLibraryItem(paper, state.libraryView));
+  });
+}
+
 function renderLibrary() {
   const favoriteCount = state.library.favorites.length;
   const ignoredCount = state.library.ignored.length;
@@ -339,6 +429,7 @@ function renderLibrary() {
   elements.libraryRefreshNote.textContent = staleCount
     ? `${staleCount} 篇收藏可能只有截断摘要，可刷新补全可获取的元数据。`
     : "收藏元数据已包含完整摘要或来源未提供更多内容。";
+  renderLibraryItems();
 
   elements.searchHistory.replaceChildren();
   if (!state.library.history.length) {
@@ -549,6 +640,46 @@ async function updatePaperLibrary(action, paper) {
   const data = await requestJson("/api/library", { action, paper, paperKey: paper.paperKey });
   updateLibrary(data.library || {});
   return data;
+}
+
+async function updateLibraryPaperFromPanel(action, paper) {
+  try {
+    await updatePaperLibrary(action, paper);
+    const messages = {
+      unfavorite: "已从收藏列表移除。",
+      unignore: "已恢复该论文，后续检索会重新显示。",
+    };
+    setMessage(messages[action] || "本地收件箱已更新。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function downloadLibraryPaper(paper) {
+  if (!paper || !paper.downloadable || paper.isDownloaded) {
+    return;
+  }
+  setMessage(`正在下载：${paper.title}`);
+  try {
+    const data = await requestJson("/api/download", paper, 60000);
+    elements.savedCount.textContent = String(data.downloadedCount || 0);
+    await refreshStatus();
+    setMessage(`${data.message} ${data.filename}`, "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function copyLibraryPaperExport(paper, format) {
+  try {
+    const data = await exportPapers({ scope: "results", format, papers: [paper], download: false });
+    await copyText(data.content);
+    setMessage(format === "bibtex" ? "收藏 BibTeX 已复制。" : "收藏 Markdown 已复制。", "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
 }
 
 async function toggleFavorite(index, button) {
@@ -849,6 +980,12 @@ elements.exportFavoritesBib.addEventListener("click", () => exportFavorites("bib
 elements.exportFavoritesMarkdown.addEventListener("click", () => exportFavorites("markdown"));
 elements.refreshFavorites.addEventListener("click", refreshFavoritesMetadata);
 elements.clearHistory.addEventListener("click", clearHistory);
+elements.libraryTabs.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.libraryView = button.dataset.libraryView || "favorites";
+    renderLibraryItems();
+  });
+});
 
 updateSortButtons();
 updateSourceSummary();

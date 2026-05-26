@@ -60,6 +60,47 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertIn(key, stored["favorites"])
         self.assertEqual("Vision Language Models for Scientific Discovery", stored["favorites"][key]["paper"]["title"])
+        self.assertEqual(app.LIBRARY_SCHEMA_VERSION, stored["version"])
+        self.assertIn("translations", stored["favorites"][key]["paper"])
+
+    def test_migrates_legacy_library_entries(self):
+        key = app.paper_key(SAMPLE_PAPER)
+        legacy = {
+            "version": 1,
+            "favorites": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": SAMPLE_PAPER}},
+            "ignored": {},
+            "downloads": {},
+            "history": [{"query": "vision language", "resultCount": 3, "sources": ["arxiv"]}],
+        }
+
+        migrated = app.migrate_library(legacy)
+
+        self.assertEqual(app.LIBRARY_SCHEMA_VERSION, migrated["version"])
+        self.assertIn(key, migrated["favorites"])
+        paper = migrated["favorites"][key]["paper"]
+        self.assertEqual(key, paper["paperKey"])
+        self.assertEqual("", paper["readingStatus"])
+        self.assertEqual([], paper["tags"])
+        self.assertEqual({}, paper["translations"])
+        self.assertEqual(1, len(migrated["history"]))
+
+    def test_unignore_removes_ignored_entry(self):
+        key = app.paper_key(SAMPLE_PAPER)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_path = Path(tmpdir) / "library.json"
+            with patch.object(app, "LIBRARY_PATH", library_path):
+                app.save_library({
+                    "version": app.LIBRARY_SCHEMA_VERSION,
+                    "favorites": {},
+                    "ignored": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": SAMPLE_PAPER}},
+                    "downloads": {},
+                    "history": [],
+                })
+                response = app.update_library({"action": "unignore", "paperKey": key})
+                stored = app.load_library()
+
+        self.assertTrue(response["ok"])
+        self.assertNotIn(key, stored["ignored"])
 
     def test_markdown_export_prefers_full_abstract(self):
         paper = {

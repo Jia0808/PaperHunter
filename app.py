@@ -121,6 +121,7 @@ ACL_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 ACL_ENTRY_CACHE: list[dict] | None = None
 LIBRARY_PATH = DATA_DIR / "library.json"
 LIBRARY_LOCK = RLock()
+LIBRARY_SCHEMA_VERSION = 2
 MAX_SEARCH_HISTORY = 30
 PAPER_SNAPSHOT_FIELDS = (
     "title",
@@ -140,6 +141,10 @@ PAPER_SNAPSHOT_FIELDS = (
     "fullAbstract",
     "downloadable",
     "isDownloaded",
+    "readingStatus",
+    "note",
+    "tags",
+    "translations",
 )
 
 
@@ -211,6 +216,15 @@ def paper_snapshot(paper: dict) -> dict:
     snapshot["fullAbstract"] = clean_html(str(snapshot.get("fullAbstract") or ""))
     snapshot["downloadable"] = bool(snapshot.get("pdfUrl"))
     snapshot["isDownloaded"] = bool(snapshot.get("isDownloaded"))
+    if snapshot.get("readingStatus") not in {"", "unread", "reading", "read", "to_translate"}:
+        snapshot["readingStatus"] = ""
+    if not isinstance(snapshot.get("tags"), list):
+        snapshot["tags"] = []
+    else:
+        snapshot["tags"] = [clean_display_text(str(tag), 32) for tag in snapshot["tags"] if str(tag).strip()][:12]
+    if not isinstance(snapshot.get("translations"), dict):
+        snapshot["translations"] = {}
+    snapshot["note"] = clean_display_text(str(snapshot.get("note") or ""), 1000)
     return snapshot
 
 
@@ -341,12 +355,100 @@ def existing_pdf_count() -> int:
 
 def empty_library() -> dict:
     return {
-        "version": 1,
+        "version": LIBRARY_SCHEMA_VERSION,
         "favorites": {},
         "ignored": {},
         "downloads": {},
         "history": [],
     }
+
+
+def normalize_library_entry(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+
+    paper = value.get("paper") if isinstance(value.get("paper"), dict) else value
+    snapshot = paper_snapshot(paper)
+    entry = {
+        "createdAt": str(value.get("createdAt") or value.get("favoritedAt") or value.get("ignoredAt") or now_iso()),
+        "paper": snapshot,
+    }
+    for field in ("updatedAt", "refreshedAt"):
+        if value.get(field):
+            entry[field] = str(value.get(field))
+    return entry
+
+
+def normalize_download_entry(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+
+    paper = value.get("paper") if isinstance(value.get("paper"), dict) else value
+    snapshot = paper_snapshot({**paper, "isDownloaded": True})
+    return {
+        "createdAt": str(value.get("createdAt") or now_iso()),
+        "filename": str(value.get("filename") or ""),
+        "paper": snapshot,
+    }
+
+
+def normalize_history(items: object) -> list[dict]:
+    if not isinstance(items, list):
+        return []
+
+    history = []
+    for item in items[:MAX_SEARCH_HISTORY]:
+        if not isinstance(item, dict):
+            continue
+        query = str(item.get("query", "")).strip()
+        if not query:
+            continue
+        sources = item.get("sources") if isinstance(item.get("sources"), list) else []
+        source_counts = item.get("sourceCounts") if isinstance(item.get("sourceCounts"), dict) else {}
+        history.append({
+            "query": query,
+            "createdAt": str(item.get("createdAt") or ""),
+            "resultCount": clamp_int(item.get("resultCount"), 0, 0, MAX_RESULTS_LIMIT * len(SOURCE_LABELS)),
+            "sources": [str(source) for source in sources if str(source) in SOURCE_LABELS],
+            "fieldPreset": str(item.get("fieldPreset", "all")),
+            "intent": str(item.get("intent", "general")),
+            "sortBy": str(item.get("sortBy", "recent")),
+            "sourceCounts": source_counts,
+        })
+    return history
+
+
+def migrate_library(data: object) -> dict:
+    library = empty_library()
+    if not isinstance(data, dict):
+        return library
+
+    for section in ("favorites", "ignored"):
+        entries = data.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for raw_key, raw_entry in entries.items():
+            entry = normalize_library_entry(raw_entry)
+            if not entry:
+                continue
+            key = str(raw_key or entry["paper"].get("paperKey") or paper_key(entry["paper"])).strip()
+            entry["paper"]["paperKey"] = key
+            library[section][key] = entry
+
+    downloads = data.get("downloads")
+    if isinstance(downloads, dict):
+        for raw_key, raw_entry in downloads.items():
+            entry = normalize_download_entry(raw_entry)
+            if not entry:
+                continue
+            key = str(raw_key or entry["paper"].get("paperKey") or paper_key(entry["paper"])).strip()
+            entry["paper"]["paperKey"] = key
+            library["downloads"][key] = entry
+            if key in library["favorites"]:
+                library["favorites"][key]["paper"]["isDownloaded"] = True
+
+    library["history"] = normalize_history(data.get("history"))
+    return library
 
 
 def load_library() -> dict:
@@ -359,14 +461,7 @@ def load_library() -> dict:
         except (OSError, json.JSONDecodeError):
             return empty_library()
 
-    library = empty_library()
-    if isinstance(data, dict):
-        for key in ("favorites", "ignored", "downloads"):
-            if isinstance(data.get(key), dict):
-                library[key] = data[key]
-        if isinstance(data.get("history"), list):
-            library["history"] = data["history"][:MAX_SEARCH_HISTORY]
-    return library
+    return migrate_library(data)
 
 
 def save_library(library: dict) -> None:
@@ -399,6 +494,7 @@ def compact_library(library: dict) -> dict:
     favorites.sort(key=lambda paper: str(paper.get("favoritedAt", "")), reverse=True)
     ignored.sort(key=lambda paper: str(paper.get("ignoredAt", "")), reverse=True)
     return {
+        "version": LIBRARY_SCHEMA_VERSION,
         "favorites": favorites,
         "ignored": ignored,
         "history": (library.get("history") or [])[:MAX_SEARCH_HISTORY],

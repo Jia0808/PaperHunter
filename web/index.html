@@ -217,6 +217,16 @@
             <span id="libraryRefreshNote">旧收藏的摘要可能已截断，刷新后会尽量补全。</span>
           </div>
 
+          <div class="library-browser">
+            <div class="library-tabs" role="tablist" aria-label="本地收件箱列表">
+              <button id="libraryFavoritesTab" class="library-tab is-active" type="button" data-library-view="favorites" role="tab" aria-selected="true">收藏列表</button>
+              <button id="libraryIgnoredTab" class="library-tab" type="button" data-library-view="ignored" role="tab" aria-selected="false">忽略列表</button>
+            </div>
+            <div id="libraryItems" class="library-items" role="tabpanel" aria-label="本地收件箱条目">
+              <span class="history-empty">暂无收藏</span>
+            </div>
+          </div>
+
           <div class="history-block">
             <div class="history-title">最近检索</div>
             <div id="searchHistory" class="history-list">
