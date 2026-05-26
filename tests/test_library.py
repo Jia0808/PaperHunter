@@ -291,6 +291,54 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual("sk-ant-test", captured["headers"]["x-api-key"])
         self.assertEqual("2023-06-01", captured["headers"]["anthropic-version"])
 
+    def test_translate_abstract_saves_translation_to_library(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_path = Path(tmpdir) / "library.json"
+            settings_path = Path(tmpdir) / "settings.json"
+            with patch.object(app, "LIBRARY_PATH", library_path), patch.object(app, "SETTINGS_PATH", settings_path):
+                app.save_settings(app.normalize_settings({
+                    "provider": "apixin_gpt",
+                    "apiType": "responses",
+                    "baseUrl": "https://example.test",
+                    "endpoint": "/v1/responses",
+                    "model": "gpt-test",
+                    "apiKey": "sk-test",
+                }))
+                with patch.object(app, "invoke_model_text", return_value=("这是一段中文摘要。", {"total_tokens": 12})):
+                    response = app.translate_abstract({"paper": SAMPLE_PAPER})
+                stored = app.load_library()
+
+        key = app.paper_key(SAMPLE_PAPER)
+        self.assertTrue(response["ok"])
+        self.assertEqual("这是一段中文摘要。", response["translation"]["text"])
+        self.assertIn(key, stored["papers"])
+        saved_translation = stored["papers"][key]["paper"]["translations"]["zh"]
+        self.assertEqual("gpt-test", saved_translation["model"])
+        self.assertEqual(app.TRANSLATION_PROMPT_VERSION, saved_translation["promptVersion"])
+        self.assertEqual(app.stable_text_hash(app.translation_source_text(SAMPLE_PAPER)), saved_translation["sourceHash"])
+
+    def test_translation_marks_stale_when_abstract_changes(self):
+        source_hash = app.stable_text_hash("Old abstract.")
+        paper = {
+            **SAMPLE_PAPER,
+            "abstract": "New abstract.",
+            "translations": {
+                "zh": {
+                    "text": "旧译文。",
+                    "language": "zh",
+                    "provider": "apixin_gpt",
+                    "model": "gpt-test",
+                    "translatedAt": "2026-05-27T00:00:00+00:00",
+                    "promptVersion": app.TRANSLATION_PROMPT_VERSION,
+                    "sourceHash": source_hash,
+                }
+            },
+        }
+
+        snapshot = app.paper_snapshot(paper)
+
+        self.assertTrue(snapshot["translations"]["zh"]["stale"])
+
 
 if __name__ == "__main__":
     unittest.main()

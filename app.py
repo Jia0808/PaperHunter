@@ -1,4 +1,5 @@
 import gzip
+import hashlib
 import json
 import mimetypes
 import re
@@ -122,8 +123,9 @@ ACL_ENTRY_CACHE: list[dict] | None = None
 LIBRARY_PATH = DATA_DIR / "library.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 LIBRARY_LOCK = RLock()
-LIBRARY_SCHEMA_VERSION = 2
+LIBRARY_SCHEMA_VERSION = 3
 SETTINGS_SCHEMA_VERSION = 1
+TRANSLATION_PROMPT_VERSION = "abstract-zh-v1"
 MAX_SEARCH_HISTORY = 30
 API_TYPE_ENDPOINTS = {
     "responses": "/v1/responses",
@@ -254,6 +256,41 @@ def clean_display_text(value: str, limit: int) -> str:
     return compact_text(clean_html(str(value or "")), limit)
 
 
+def stable_text_hash(value: str) -> str:
+    normalized = clean_html(str(value or "")).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def translation_source_text(paper: dict) -> str:
+    return clean_html(str(paper.get("fullAbstract") or paper.get("abstract") or ""))
+
+
+def normalize_translations(value: object, paper: dict) -> dict:
+    if not isinstance(value, dict):
+        return {}
+
+    current_hash = stable_text_hash(translation_source_text(paper))
+    normalized = {}
+    for language, item in value.items():
+        if not isinstance(item, dict):
+            continue
+        text = clean_html(str(item.get("text") or ""))
+        if not text:
+            continue
+        source_hash = str(item.get("sourceHash") or "")
+        normalized[str(language)] = {
+            "text": text,
+            "language": str(item.get("language") or language),
+            "provider": str(item.get("provider") or ""),
+            "model": str(item.get("model") or ""),
+            "translatedAt": str(item.get("translatedAt") or ""),
+            "promptVersion": str(item.get("promptVersion") or ""),
+            "sourceHash": source_hash,
+            "stale": bool(source_hash and source_hash != current_hash),
+        }
+    return normalized
+
+
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
@@ -293,6 +330,8 @@ def paper_snapshot(paper: dict) -> dict:
         snapshot["tags"] = [clean_display_text(str(tag), 32) for tag in snapshot["tags"] if str(tag).strip()][:12]
     if not isinstance(snapshot.get("translations"), dict):
         snapshot["translations"] = {}
+    else:
+        snapshot["translations"] = normalize_translations(snapshot["translations"], snapshot)
     snapshot["note"] = clean_display_text(str(snapshot.get("note") or ""), 1000)
     return snapshot
 
@@ -451,6 +490,7 @@ def existing_pdf_count() -> int:
 def empty_library() -> dict:
     return {
         "version": LIBRARY_SCHEMA_VERSION,
+        "papers": {},
         "favorites": {},
         "ignored": {},
         "downloads": {},
@@ -518,6 +558,16 @@ def migrate_library(data: object) -> dict:
     if not isinstance(data, dict):
         return library
 
+    entries = data.get("papers")
+    if isinstance(entries, dict):
+        for raw_key, raw_entry in entries.items():
+            entry = normalize_library_entry(raw_entry)
+            if not entry:
+                continue
+            key = str(raw_key or entry["paper"].get("paperKey") or paper_key(entry["paper"])).strip()
+            entry["paper"]["paperKey"] = key
+            library["papers"][key] = entry
+
     for section in ("favorites", "ignored"):
         entries = data.get(section)
         if not isinstance(entries, dict):
@@ -529,6 +579,7 @@ def migrate_library(data: object) -> dict:
             key = str(raw_key or entry["paper"].get("paperKey") or paper_key(entry["paper"])).strip()
             entry["paper"]["paperKey"] = key
             library[section][key] = entry
+            library["papers"].setdefault(key, entry)
 
     downloads = data.get("downloads")
     if isinstance(downloads, dict):
@@ -539,6 +590,7 @@ def migrate_library(data: object) -> dict:
             key = str(raw_key or entry["paper"].get("paperKey") or paper_key(entry["paper"])).strip()
             entry["paper"]["paperKey"] = key
             library["downloads"][key] = entry
+            library["papers"].setdefault(key, entry)
             if key in library["favorites"]:
                 library["favorites"][key]["paper"]["isDownloaded"] = True
 
@@ -792,6 +844,61 @@ def test_anthropic_connection(settings: dict) -> tuple[str, dict]:
     return extract_anthropic_text(data), usage
 
 
+def model_headers(settings: dict) -> dict:
+    api_type = normalize_api_type(settings.get("apiType"))
+    if api_type == "anthropic_messages":
+        return {
+            "x-api-key": settings["apiKey"],
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        }
+    return {
+        "Authorization": f"Bearer {settings['apiKey']}",
+        "Content-Type": "application/json",
+    }
+
+
+def invoke_model_text(settings: dict, prompt: str, max_tokens: int = 900) -> tuple[str, dict]:
+    api_type = normalize_api_type(settings.get("apiType"))
+    url = join_url(settings["baseUrl"], settings["endpoint"])
+    if api_type == "responses":
+        data = post_model_json(
+            url,
+            model_headers(settings),
+            {
+                "model": settings["model"],
+                "input": prompt,
+                "max_output_tokens": max_tokens,
+            },
+        )
+        text = extract_responses_text(data)
+    elif api_type == "anthropic_messages":
+        data = post_model_json(
+            url,
+            model_headers(settings),
+            {
+                "model": settings["model"],
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+        text = extract_anthropic_text(data)
+    else:
+        data = post_model_json(
+            url,
+            model_headers(settings),
+            {
+                "model": settings["model"],
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.2,
+            },
+        )
+        text = extract_chat_completion_text(data)
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return clean_html(text), usage
+
+
 def test_model_connection(payload: dict) -> dict:
     existing = load_settings()
     raw_settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
@@ -826,6 +933,83 @@ def test_model_connection(payload: dict) -> dict:
     }
 
 
+def abstract_translation_prompt(paper: dict, source_text: str) -> str:
+    title = clean_html(str(paper.get("title") or "Untitled"))
+    return (
+        "你是严谨的学术论文摘要翻译助手。请把下面英文论文摘要翻译为简体中文。\n"
+        "要求：保留术语准确性；不要添加原文没有的信息；不要输出解释、标题或项目符号；只输出中文译文。\n\n"
+        f"论文标题：{title}\n\n"
+        f"英文摘要：\n{source_text}"
+    )
+
+
+def update_paper_translation(library: dict, key: str, paper: dict, translation: dict) -> None:
+    snapshot = paper_snapshot(paper)
+    translations = snapshot.get("translations") if isinstance(snapshot.get("translations"), dict) else {}
+    translations["zh"] = translation
+    snapshot["translations"] = normalize_translations(translations, snapshot)
+    now = now_iso()
+    library["papers"][key] = {
+        "createdAt": (library.get("papers", {}).get(key) or {}).get("createdAt", now),
+        "updatedAt": now,
+        "paper": snapshot,
+    }
+    for section in ("favorites", "ignored"):
+        item = library.get(section, {}).get(key)
+        if isinstance(item, dict):
+            item["paper"] = snapshot
+            item["updatedAt"] = now
+
+
+def translate_abstract(payload: dict) -> dict:
+    paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
+    if not paper:
+        raise ValueError("缺少论文数据。")
+
+    source_text = translation_source_text(paper)
+    if not source_text or source_text == "暂无摘要。":
+        raise ValueError("这篇论文没有可翻译的摘要。")
+
+    settings = load_settings()
+    if not settings.get("baseUrl") or not settings.get("model") or not settings.get("apiKey"):
+        raise ValueError("请先在模型设置中配置 Base URL、Model 和 API Key。")
+
+    source_hash = stable_text_hash(source_text)
+    prompt = abstract_translation_prompt(paper, source_text)
+    try:
+        translated_text, usage = invoke_model_text(settings, prompt, max_tokens=1000)
+    except Exception as exc:
+        raise RuntimeError(normalize_model_error(exc)) from exc
+    if not translated_text:
+        raise RuntimeError("模型没有返回译文。")
+
+    key = str(payload.get("paperKey") or paper.get("paperKey") or paper_key(paper)).strip()
+    translation = {
+        "text": translated_text,
+        "language": "zh",
+        "provider": settings.get("provider", ""),
+        "model": settings.get("model", ""),
+        "translatedAt": now_iso(),
+        "promptVersion": TRANSLATION_PROMPT_VERSION,
+        "sourceHash": source_hash,
+        "stale": False,
+    }
+
+    with LIBRARY_LOCK:
+        library = load_library()
+        update_paper_translation(library, key, {**paper, "paperKey": key}, translation)
+        save_library(library)
+        library_view = compact_library(library)
+
+    return {
+        "ok": True,
+        "paperKey": key,
+        "translation": translation,
+        "usage": usage,
+        "library": library_view,
+    }
+
+
 def compact_library(library: dict) -> dict:
     favorites = []
     for key, item in (library.get("favorites") or {}).items():
@@ -854,12 +1038,14 @@ def compact_library(library: dict) -> dict:
         "favoriteKeys": sorted((library.get("favorites") or {}).keys()),
         "ignoredKeys": sorted((library.get("ignored") or {}).keys()),
         "downloadKeys": sorted((library.get("downloads") or {}).keys()),
+        "paperKeys": sorted((library.get("papers") or {}).keys()),
     }
 
 
 def apply_library_state(results: list[dict], library: dict) -> tuple[list[dict], int]:
     favorites = library.get("favorites") or {}
     ignored = library.get("ignored") or {}
+    papers = library.get("papers") or {}
     annotated = []
     hidden_ignored = 0
     for paper in results:
@@ -867,6 +1053,21 @@ def apply_library_state(results: list[dict], library: dict) -> tuple[list[dict],
         if key in ignored:
             hidden_ignored += 1
             continue
+        stored = papers.get(key)
+        if isinstance(stored, dict) and isinstance(stored.get("paper"), dict):
+            stored_paper = stored["paper"]
+            translations = stored_paper.get("translations")
+            note = stored_paper.get("note")
+            tags = stored_paper.get("tags")
+            reading_status = stored_paper.get("readingStatus")
+            if translations:
+                paper["translations"] = translations
+            if note:
+                paper["note"] = note
+            if tags:
+                paper["tags"] = tags
+            if reading_status:
+                paper["readingStatus"] = reading_status
         paper["paperKey"] = key
         paper["isFavorite"] = key in favorites
         paper["isIgnored"] = False
@@ -1057,11 +1258,13 @@ def update_library(payload: dict) -> dict:
 
         if action == "favorite":
             library["favorites"][key] = {"createdAt": now, "paper": snapshot}
+            library["papers"][key] = {"createdAt": now, "paper": snapshot}
             library["ignored"].pop(key, None)
         elif action == "unfavorite":
             library["favorites"].pop(key, None)
         elif action == "ignore":
             library["ignored"][key] = {"createdAt": now, "paper": snapshot}
+            library["papers"][key] = {"createdAt": now, "paper": snapshot}
             library["favorites"].pop(key, None)
         elif action == "unignore":
             library["ignored"].pop(key, None)
@@ -1084,6 +1287,7 @@ def record_download(paper: dict, filename: str) -> None:
             "filename": filename,
             "paper": snapshot,
         }
+        library["papers"][key] = {"createdAt": now_iso(), "paper": snapshot}
         if key in library.get("favorites", {}):
             library["favorites"][key]["paper"] = snapshot
         save_library(library)
@@ -2358,6 +2562,9 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/settings"):
                 self.send_json(save_model_settings(payload))
+                return
+            if self.path.startswith("/api/translate/abstract"):
+                self.send_json(translate_abstract(payload))
                 return
             self.send_json({"ok": False, "error": "接口不存在。"}, status=404)
         except ValueError as exc:

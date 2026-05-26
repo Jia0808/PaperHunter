@@ -332,6 +332,13 @@ function paperDisplayMeta(paper) {
   ].filter(Boolean).join(" · ");
 }
 
+function zhTranslation(paper) {
+  const translations = paper && paper.translations && typeof paper.translations === "object"
+    ? paper.translations
+    : {};
+  return translations.zh && typeof translations.zh === "object" ? translations.zh : null;
+}
+
 function endpointForApiType(apiType) {
   return (state.modelApiTypes && state.modelApiTypes[apiType]) || "/v1/chat/completions";
 }
@@ -494,8 +501,16 @@ function createLibraryItem(paper, view) {
   actions.append(openLink);
 
   if (view === "favorites") {
+    const translation = zhTranslation(paper);
+    if (translation) {
+      const translated = document.createElement("p");
+      translated.className = `library-translation${translation.stale ? " is-stale" : ""}`;
+      translated.textContent = translation.stale ? `译文可能已过期：${translation.text}` : translation.text;
+      item.append(translated);
+    }
     actions.append(
       createLibraryAction("下载", () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
+      createLibraryAction(translation ? "重译摘要" : "翻译摘要", () => translateLibraryPaper(paper)),
       createLibraryAction("BibTeX", () => copyLibraryPaperExport(paper, "bibtex")),
       createLibraryAction("Markdown", () => copyLibraryPaperExport(paper, "markdown")),
       createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
@@ -642,6 +657,14 @@ function createPaperCard(paper, index) {
 
   content.append(meta, title, authors, abstract);
 
+  const translation = zhTranslation(paper);
+  if (translation) {
+    const translated = document.createElement("p");
+    translated.className = `translated-abstract${translation.stale ? " is-stale" : ""}`;
+    translated.textContent = translation.stale ? `中文摘要可能已过期：${translation.text}` : `中文摘要：${translation.text}`;
+    content.append(translated);
+  }
+
   const actions = document.createElement("div");
   actions.className = "paper-actions";
 
@@ -686,9 +709,15 @@ function createPaperCard(paper, index) {
   copyMarkdownButton.textContent = "复制 Markdown";
   copyMarkdownButton.addEventListener("click", () => copyPaperExport(index, "markdown"));
 
+  const translateButton = document.createElement("button");
+  translateButton.className = "paper-action";
+  translateButton.type = "button";
+  translateButton.textContent = translation ? "重译摘要" : "翻译摘要";
+  translateButton.addEventListener("click", () => translateResultPaper(index, translateButton));
+
   const secondaryActions = document.createElement("div");
   secondaryActions.className = "paper-secondary-actions";
-  secondaryActions.append(favoriteButton, ignoreButton, copyBibButton, copyMarkdownButton);
+  secondaryActions.append(favoriteButton, translateButton, ignoreButton, copyBibButton, copyMarkdownButton);
 
   actions.append(downloadButton, link, secondaryActions);
   card.append(content, actions);
@@ -847,6 +876,43 @@ async function copyLibraryPaperExport(paper, format) {
   } catch (error) {
     setMessage(error.message, "error");
   }
+}
+
+async function translatePaper(paper, button) {
+  if (!paper) {
+    return;
+  }
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "翻译中";
+  }
+  setMessage("正在翻译摘要，内容会发送到你配置的模型接口...");
+  try {
+    const data = await requestJson("/api/translate/abstract", { paper, paperKey: paper.paperKey }, 90000);
+    if (!paper.translations || typeof paper.translations !== "object") {
+      paper.translations = {};
+    }
+    paper.translations.zh = data.translation;
+    updateLibrary(data.library || state.library);
+    setMessage("中文摘要已保存到本地收件箱。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function translateLibraryPaper(paper) {
+  await translatePaper(paper, null);
+}
+
+async function translateResultPaper(index, button) {
+  await translatePaper(state.results[index], button);
 }
 
 async function toggleFavorite(index, button) {
