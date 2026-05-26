@@ -120,9 +120,78 @@ ACL_BIB_CACHE = CACHE_DIR / "acl-anthology-abstracts.bib.gz"
 ACL_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 ACL_ENTRY_CACHE: list[dict] | None = None
 LIBRARY_PATH = DATA_DIR / "library.json"
+SETTINGS_PATH = DATA_DIR / "settings.json"
 LIBRARY_LOCK = RLock()
 LIBRARY_SCHEMA_VERSION = 2
+SETTINGS_SCHEMA_VERSION = 1
 MAX_SEARCH_HISTORY = 30
+API_TYPE_ENDPOINTS = {
+    "responses": "/v1/responses",
+    "chat_completions": "/v1/chat/completions",
+    "anthropic_messages": "/v1/messages",
+}
+MODEL_PROVIDER_PRESETS = [
+    {
+        "id": "apixin_gpt",
+        "name": "APIXIN GPT 中转",
+        "domain": "apixin.top",
+        "recommended": True,
+        "apiType": "responses",
+        "baseUrl": "https://apixin.top",
+        "endpoint": "/v1/responses",
+        "defaultModel": "gpt-5.5",
+        "badges": ["推荐", "GPT", "Responses"],
+        "description": "适合快速启用 GPT 摘要翻译，配置简单。",
+    },
+    {
+        "id": "apixin_multi",
+        "name": "APIXIN 多模型中转",
+        "domain": "apixin.cn",
+        "recommended": False,
+        "apiType": "chat_completions",
+        "baseUrl": "https://apixin.cn",
+        "endpoint": "/v1/chat/completions",
+        "defaultModel": "",
+        "badges": ["多模型", "Chat Completions"],
+        "description": "适合需要 Claude、DeepSeek、GPT 等多模型选择的用户。",
+    },
+    {
+        "id": "deepseek",
+        "name": "DeepSeek",
+        "domain": "api.deepseek.com",
+        "recommended": False,
+        "apiType": "chat_completions",
+        "baseUrl": "https://api.deepseek.com",
+        "endpoint": "/v1/chat/completions",
+        "defaultModel": "deepseek-chat",
+        "badges": ["自带 Key", "Chat Completions"],
+        "description": "适合已有 DeepSeek API Key 的用户。",
+    },
+    {
+        "id": "claude",
+        "name": "Claude",
+        "domain": "api.anthropic.com",
+        "recommended": False,
+        "apiType": "anthropic_messages",
+        "baseUrl": "https://api.anthropic.com",
+        "endpoint": "/v1/messages",
+        "defaultModel": "",
+        "badges": ["自带 Key", "Messages API"],
+        "description": "适合已有 Anthropic / Claude API Key 的用户。",
+    },
+    {
+        "id": "custom",
+        "name": "自定义接口",
+        "domain": "custom",
+        "recommended": False,
+        "apiType": "chat_completions",
+        "baseUrl": "",
+        "endpoint": "/v1/chat/completions",
+        "defaultModel": "",
+        "badges": ["高级", "协议自选"],
+        "description": "适合 Qwen、Kimi、智谱、OpenRouter、SiliconFlow、火山方舟等兼容接口。",
+    },
+]
 PAPER_SNAPSHOT_FIELDS = (
     "title",
     "authors",
@@ -257,6 +326,32 @@ def contains_any_term(text: str, terms: str) -> bool:
 
 def request_timeout(read_timeout: int = READ_TIMEOUT_SECONDS) -> tuple[int, int]:
     return (CONNECT_TIMEOUT_SECONDS, read_timeout)
+
+
+def join_url(base_url: str, endpoint: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    path = str(endpoint or "").strip()
+    if not path:
+        path = API_TYPE_ENDPOINTS["chat_completions"]
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}" if base else path
+
+
+def provider_preset(provider_id: str) -> dict:
+    for preset in MODEL_PROVIDER_PRESETS:
+        if preset["id"] == provider_id:
+            return preset
+    return MODEL_PROVIDER_PRESETS[-1]
+
+
+def mask_secret(value: str) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    if len(text) <= 10:
+        return f"{text[:2]}...{text[-2:]}"
+    return f"{text[:6]}...{text[-4:]}"
 
 
 def format_source_error(source: str, exc: Exception | str) -> str:
@@ -471,6 +566,264 @@ def save_library(library: dict) -> None:
             json.dump(library, file, ensure_ascii=False, indent=2)
             file.write("\n")
         tmp_path.replace(LIBRARY_PATH)
+
+
+def empty_settings() -> dict:
+    preset = provider_preset("apixin_gpt")
+    return {
+        "version": SETTINGS_SCHEMA_VERSION,
+        "provider": preset["id"],
+        "apiType": preset["apiType"],
+        "baseUrl": preset["baseUrl"],
+        "endpoint": preset["endpoint"],
+        "model": preset["defaultModel"],
+        "apiKey": "",
+        "updatedAt": "",
+    }
+
+
+def normalize_api_type(value: object) -> str:
+    api_type = str(value or "").strip()
+    return api_type if api_type in API_TYPE_ENDPOINTS else "chat_completions"
+
+
+def normalize_settings(data: object, existing: dict | None = None) -> dict:
+    base = existing.copy() if isinstance(existing, dict) else empty_settings()
+    raw = data if isinstance(data, dict) else {}
+    provider = str(raw.get("provider") or base.get("provider") or "custom").strip()
+    preset = provider_preset(provider)
+    api_type = normalize_api_type(raw.get("apiType") or base.get("apiType") or preset["apiType"])
+    endpoint = str(raw.get("endpoint") or base.get("endpoint") or API_TYPE_ENDPOINTS[api_type]).strip()
+    if not endpoint or endpoint == API_TYPE_ENDPOINTS.get(normalize_api_type(base.get("apiType"))):
+        endpoint = API_TYPE_ENDPOINTS[api_type]
+
+    api_key = raw.get("apiKey")
+    if api_key is None:
+        api_key = base.get("apiKey", "")
+
+    settings = {
+        "version": SETTINGS_SCHEMA_VERSION,
+        "provider": provider,
+        "apiType": api_type,
+        "baseUrl": str(raw.get("baseUrl") if raw.get("baseUrl") is not None else base.get("baseUrl") or preset["baseUrl"]).strip().rstrip("/"),
+        "endpoint": endpoint if endpoint.startswith("/") else f"/{endpoint}",
+        "model": str(raw.get("model") if raw.get("model") is not None else base.get("model") or preset["defaultModel"]).strip(),
+        "apiKey": str(api_key or "").strip(),
+        "updatedAt": str(raw.get("updatedAt") or base.get("updatedAt") or ""),
+    }
+    return settings
+
+
+def load_settings() -> dict:
+    if not SETTINGS_PATH.exists():
+        return empty_settings()
+    try:
+        with SETTINGS_PATH.open("r", encoding="utf-8") as file:
+            return normalize_settings(json.load(file))
+    except (OSError, json.JSONDecodeError):
+        return empty_settings()
+
+
+def save_settings(settings: dict) -> None:
+    tmp_path = SETTINGS_PATH.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as file:
+        json.dump(settings, file, ensure_ascii=False, indent=2)
+        file.write("\n")
+    tmp_path.replace(SETTINGS_PATH)
+
+
+def public_settings(settings: dict) -> dict:
+    endpoint = settings.get("endpoint") or API_TYPE_ENDPOINTS[normalize_api_type(settings.get("apiType"))]
+    return {
+        "version": SETTINGS_SCHEMA_VERSION,
+        "provider": settings.get("provider", "custom"),
+        "apiType": normalize_api_type(settings.get("apiType")),
+        "baseUrl": settings.get("baseUrl", ""),
+        "endpoint": endpoint,
+        "model": settings.get("model", ""),
+        "hasApiKey": bool(settings.get("apiKey")),
+        "apiKeyMasked": mask_secret(str(settings.get("apiKey", ""))),
+        "finalUrl": join_url(str(settings.get("baseUrl", "")), str(endpoint)),
+        "updatedAt": settings.get("updatedAt", ""),
+    }
+
+
+def model_settings_status() -> dict:
+    settings = load_settings()
+    return {
+        "ok": True,
+        "providers": MODEL_PROVIDER_PRESETS,
+        "apiTypes": API_TYPE_ENDPOINTS,
+        "settings": public_settings(settings),
+    }
+
+
+def save_model_settings(payload: dict) -> dict:
+    existing = load_settings()
+    raw_settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    settings = normalize_settings(raw_settings, existing)
+    settings["updatedAt"] = now_iso()
+    save_settings(settings)
+    return {
+        "ok": True,
+        "providers": MODEL_PROVIDER_PRESETS,
+        "apiTypes": API_TYPE_ENDPOINTS,
+        "settings": public_settings(settings),
+    }
+
+
+def extract_responses_text(data: dict) -> str:
+    if data.get("output_text"):
+        return str(data.get("output_text"))
+    for item in data.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if isinstance(content, dict) and content.get("text"):
+                return str(content.get("text"))
+    return ""
+
+
+def extract_chat_completion_text(data: dict) -> str:
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    if not choices or not isinstance(choices[0], dict):
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+    return str(message.get("content") or choices[0].get("text") or "")
+
+
+def extract_anthropic_text(data: dict) -> str:
+    for item in data.get("content") or []:
+        if isinstance(item, dict) and item.get("text"):
+            return str(item.get("text"))
+    return ""
+
+
+def normalize_model_error(exc: Exception) -> str:
+    if isinstance(exc, requests.Timeout):
+        return "测试连接超时，请检查网络、Base URL 或稍后重试。"
+    if isinstance(exc, requests.ConnectionError):
+        return "无法连接到模型接口，请检查 Base URL 和网络。"
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        response = exc.response
+        status = response.status_code
+        body = compact_text(response.text, 260)
+        lowered = body.lower()
+        if status in {401, 403}:
+            return "API Key 无效或没有权限，请检查密钥和服务商权限。"
+        if status == 404:
+            return "接口地址或模型不存在，请检查 Endpoint 和 Model。"
+        if status == 429:
+            return "请求被限流，请稍后重试或检查服务商额度。"
+        if status in {402, 409} or "insufficient" in lowered or "quota" in lowered or "balance" in lowered:
+            return "服务商返回额度或权限不足，请到对应控制台检查。"
+        return f"模型接口返回 HTTP {status}: {body}"
+    return compact_text(str(exc), 260) or "测试连接失败。"
+
+
+def post_model_json(url: str, headers: dict, body: dict) -> dict:
+    response = requests.post(
+        url,
+        headers=headers,
+        json=body,
+        timeout=request_timeout(30),
+    )
+    response.raise_for_status()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError("模型接口没有返回 JSON。") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("模型接口返回格式不是 JSON 对象。")
+    return data
+
+
+def test_responses_connection(settings: dict) -> tuple[str, dict]:
+    url = join_url(settings["baseUrl"], settings["endpoint"])
+    data = post_model_json(
+        url,
+        {
+            "Authorization": f"Bearer {settings['apiKey']}",
+            "Content-Type": "application/json",
+        },
+        {
+            "model": settings["model"],
+            "input": "Reply with exactly OK.",
+            "max_output_tokens": 8,
+        },
+    )
+    return extract_responses_text(data), data.get("usage") if isinstance(data.get("usage"), dict) else {}
+
+
+def test_chat_completions_connection(settings: dict) -> tuple[str, dict]:
+    url = join_url(settings["baseUrl"], settings["endpoint"])
+    data = post_model_json(
+        url,
+        {
+            "Authorization": f"Bearer {settings['apiKey']}",
+            "Content-Type": "application/json",
+        },
+        {
+            "model": settings["model"],
+            "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+            "max_tokens": 8,
+            "temperature": 0,
+        },
+    )
+    return extract_chat_completion_text(data), data.get("usage") if isinstance(data.get("usage"), dict) else {}
+
+
+def test_anthropic_connection(settings: dict) -> tuple[str, dict]:
+    url = join_url(settings["baseUrl"], settings["endpoint"])
+    data = post_model_json(
+        url,
+        {
+            "x-api-key": settings["apiKey"],
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+        },
+        {
+            "model": settings["model"],
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+        },
+    )
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return extract_anthropic_text(data), usage
+
+
+def test_model_connection(payload: dict) -> dict:
+    existing = load_settings()
+    raw_settings = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    settings = normalize_settings(raw_settings, existing)
+    if not settings.get("baseUrl"):
+        raise ValueError("请填写 Base URL。")
+    if not settings.get("model"):
+        raise ValueError("请填写模型名称。")
+    if not settings.get("apiKey"):
+        raise ValueError("请填写 API Key，或先保存已有密钥。")
+
+    api_type = normalize_api_type(settings.get("apiType"))
+    testers = {
+        "responses": test_responses_connection,
+        "chat_completions": test_chat_completions_connection,
+        "anthropic_messages": test_anthropic_connection,
+    }
+    try:
+        text, usage = testers[api_type](settings)
+    except Exception as exc:
+        raise RuntimeError(normalize_model_error(exc)) from exc
+
+    return {
+        "ok": True,
+        "message": "测试连接成功。",
+        "provider": settings.get("provider"),
+        "apiType": api_type,
+        "finalUrl": join_url(settings["baseUrl"], settings["endpoint"]),
+        "model": settings.get("model"),
+        "sample": compact_text(text or "OK", 120),
+        "usage": usage,
+    }
 
 
 def compact_library(library: dict) -> dict:
@@ -1969,8 +2322,15 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                     "sources": SOURCE_LABELS,
                     "externalGateways": EXTERNAL_GATEWAYS,
                     "library": compact_library(library),
+                    "modelSettings": public_settings(load_settings()),
+                    "modelProviders": MODEL_PROVIDER_PRESETS,
+                    "modelApiTypes": API_TYPE_ENDPOINTS,
                 }
             )
+            return
+
+        if self.path.startswith("/api/settings"):
+            self.send_json(model_settings_status())
             return
 
         if self.path == "/" or not self.path.startswith("/api/"):
@@ -1992,6 +2352,12 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/export"):
                 self.send_json(export_papers(payload))
+                return
+            if self.path.startswith("/api/settings/test"):
+                self.send_json(test_model_connection(payload))
+                return
+            if self.path.startswith("/api/settings"):
+                self.send_json(save_model_settings(payload))
                 return
             self.send_json({"ok": False, "error": "接口不存在。"}, status=404)
         except ValueError as exc:

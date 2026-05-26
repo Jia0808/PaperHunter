@@ -188,6 +188,54 @@
           </div>
         </div>
 
+        <section class="model-panel" aria-label="模型设置">
+          <div class="library-heading">
+            <div>
+              <strong>模型设置</strong>
+              <span>摘要翻译前配置自己的 API Key</span>
+            </div>
+            <span id="modelStatusBadge" class="model-status-badge">未测试</span>
+          </div>
+
+          <div id="modelProviders" class="provider-grid" role="list"></div>
+
+          <div class="model-form">
+            <label class="field">
+              <span>接口协议</span>
+              <select id="modelApiTypeSelect">
+                <option value="responses">Responses API</option>
+                <option value="chat_completions">Chat Completions</option>
+                <option value="anthropic_messages">Anthropic Messages</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Base URL</span>
+              <input id="modelBaseUrlInput" type="url" placeholder="https://api.example.com" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Endpoint</span>
+              <input id="modelEndpointInput" type="text" placeholder="/v1/chat/completions" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>Model</span>
+              <input id="modelNameInput" type="text" placeholder="gpt-5.5, deepseek-chat, qwen-plus..." autocomplete="off" />
+            </label>
+            <label class="field">
+              <span>API Key <small id="modelKeyHint">未保存</small></span>
+              <input id="modelApiKeyInput" type="password" placeholder="留空则保留已保存密钥" autocomplete="new-password" />
+            </label>
+            <div class="endpoint-preview">
+              <span>最终请求地址</span>
+              <strong id="modelFinalUrl">未配置</strong>
+            </div>
+            <div class="model-actions">
+              <button id="testModelButton" class="secondary-action compact-action" type="button">测试连接</button>
+              <button id="saveModelButton" class="secondary-action compact-action" type="button">保存设置</button>
+            </div>
+            <p id="modelTestNote">测试会发送一条极短请求，可能消耗少量 token。PaperHunter 不查询余额。</p>
+          </div>
+        </section>
+
         <section class="library-panel" aria-label="本地收件箱">
           <div class="library-heading">
             <div>

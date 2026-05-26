@@ -153,6 +153,144 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual("Full abstract after refresh.", stored["favorites"][key]["paper"]["fullAbstract"])
         self.assertEqual(key, stored["favorites"][key]["paper"]["paperKey"])
 
+    def test_model_settings_public_view_masks_api_key(self):
+        settings = app.normalize_settings({
+            "provider": "apixin_gpt",
+            "apiType": "responses",
+            "baseUrl": "https://example.test",
+            "endpoint": "/v1/responses",
+            "model": "gpt-test",
+            "apiKey": "sk-secret-value",
+        })
+
+        public = app.public_settings(settings)
+
+        self.assertTrue(public["hasApiKey"])
+        self.assertEqual("sk-sec...alue", public["apiKeyMasked"])
+        self.assertNotIn("apiKey", public)
+        self.assertEqual("https://example.test/v1/responses", public["finalUrl"])
+
+    def test_model_settings_preserve_existing_key_when_blank(self):
+        existing = app.normalize_settings({
+            "provider": "apixin_gpt",
+            "apiType": "responses",
+            "baseUrl": "https://example.test",
+            "endpoint": "/v1/responses",
+            "model": "gpt-test",
+            "apiKey": "sk-existing",
+        })
+
+        updated = app.normalize_settings({"model": "gpt-new"}, existing)
+
+        self.assertEqual("sk-existing", updated["apiKey"])
+        self.assertEqual("gpt-new", updated["model"])
+
+    def test_responses_connection_uses_responses_payload(self):
+        captured = {}
+
+        def fake_post(url, headers, json, timeout):
+            captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+
+            class Response:
+                status_code = 200
+                text = "{}"
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"output_text": "OK", "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+            return Response()
+
+        settings = app.normalize_settings({
+            "apiType": "responses",
+            "baseUrl": "https://example.test",
+            "endpoint": "/v1/responses",
+            "model": "gpt-test",
+            "apiKey": "sk-test",
+        })
+
+        with patch.object(app.requests, "post", side_effect=fake_post):
+            text, usage = app.test_responses_connection(settings)
+
+        self.assertEqual("OK", text)
+        self.assertEqual({"input_tokens": 1, "output_tokens": 1}, usage)
+        self.assertEqual("https://example.test/v1/responses", captured["url"])
+        self.assertEqual("Bearer sk-test", captured["headers"]["Authorization"])
+        self.assertEqual("gpt-test", captured["json"]["model"])
+        self.assertEqual("Reply with exactly OK.", captured["json"]["input"])
+
+    def test_chat_connection_uses_chat_payload(self):
+        captured = {}
+
+        def fake_post(url, headers, json, timeout):
+            captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+
+            class Response:
+                status_code = 200
+                text = "{}"
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"choices": [{"message": {"content": "OK"}}], "usage": {"total_tokens": 2}}
+
+            return Response()
+
+        settings = app.normalize_settings({
+            "apiType": "chat_completions",
+            "baseUrl": "https://example.test",
+            "endpoint": "/v1/chat/completions",
+            "model": "qwen-plus",
+            "apiKey": "sk-test",
+        })
+
+        with patch.object(app.requests, "post", side_effect=fake_post):
+            text, usage = app.test_chat_completions_connection(settings)
+
+        self.assertEqual("OK", text)
+        self.assertEqual({"total_tokens": 2}, usage)
+        self.assertEqual("https://example.test/v1/chat/completions", captured["url"])
+        self.assertEqual("qwen-plus", captured["json"]["model"])
+        self.assertEqual("Reply with exactly OK.", captured["json"]["messages"][0]["content"])
+
+    def test_anthropic_connection_uses_messages_payload(self):
+        captured = {}
+
+        def fake_post(url, headers, json, timeout):
+            captured.update({"url": url, "headers": headers, "json": json, "timeout": timeout})
+
+            class Response:
+                status_code = 200
+                text = "{}"
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"content": [{"type": "text", "text": "OK"}], "usage": {"input_tokens": 1}}
+
+            return Response()
+
+        settings = app.normalize_settings({
+            "apiType": "anthropic_messages",
+            "baseUrl": "https://api.anthropic.com",
+            "endpoint": "/v1/messages",
+            "model": "claude-test",
+            "apiKey": "sk-ant-test",
+        })
+
+        with patch.object(app.requests, "post", side_effect=fake_post):
+            text, usage = app.test_anthropic_connection(settings)
+
+        self.assertEqual("OK", text)
+        self.assertEqual({"input_tokens": 1}, usage)
+        self.assertEqual("https://api.anthropic.com/v1/messages", captured["url"])
+        self.assertEqual("sk-ant-test", captured["headers"]["x-api-key"])
+        self.assertEqual("2023-06-01", captured["headers"]["anthropic-version"])
+
 
 if __name__ == "__main__":
     unittest.main()

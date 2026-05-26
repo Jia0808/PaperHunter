@@ -3,6 +3,10 @@ const state = {
   sortBy: "recent",
   isSearching: false,
   libraryView: "favorites",
+  modelProviders: [],
+  modelApiTypes: {},
+  modelSettings: null,
+  selectedProvider: "apixin_gpt",
   library: {
     favorites: [],
     ignored: [],
@@ -134,6 +138,18 @@ const elements = {
   refreshFavorites: document.querySelector("#refreshFavoritesButton"),
   libraryRefreshNote: document.querySelector("#libraryRefreshNote"),
   clearHistory: document.querySelector("#clearHistoryButton"),
+  modelStatusBadge: document.querySelector("#modelStatusBadge"),
+  modelProviders: document.querySelector("#modelProviders"),
+  modelApiType: document.querySelector("#modelApiTypeSelect"),
+  modelBaseUrl: document.querySelector("#modelBaseUrlInput"),
+  modelEndpoint: document.querySelector("#modelEndpointInput"),
+  modelName: document.querySelector("#modelNameInput"),
+  modelApiKey: document.querySelector("#modelApiKeyInput"),
+  modelKeyHint: document.querySelector("#modelKeyHint"),
+  modelFinalUrl: document.querySelector("#modelFinalUrl"),
+  testModel: document.querySelector("#testModelButton"),
+  saveModel: document.querySelector("#saveModelButton"),
+  modelTestNote: document.querySelector("#modelTestNote"),
   libraryTabs: document.querySelectorAll("[data-library-view]"),
   libraryItems: document.querySelector("#libraryItems"),
   searchHistory: document.querySelector("#searchHistory"),
@@ -314,6 +330,104 @@ function paperDisplayMeta(paper) {
     paper.year || paper.published || "",
     paper.venue || paper.category || "",
   ].filter(Boolean).join(" · ");
+}
+
+function endpointForApiType(apiType) {
+  return (state.modelApiTypes && state.modelApiTypes[apiType]) || "/v1/chat/completions";
+}
+
+function joinModelUrl(baseUrl, endpoint) {
+  const base = String(baseUrl || "").trim().replace(/\/+$/, "");
+  const path = String(endpoint || "").trim();
+  if (!base) {
+    return "未配置";
+  }
+  if (!path) {
+    return base;
+  }
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function currentModelForm() {
+  return {
+    provider: state.selectedProvider || "custom",
+    apiType: elements.modelApiType.value,
+    baseUrl: elements.modelBaseUrl.value.trim(),
+    endpoint: elements.modelEndpoint.value.trim(),
+    model: elements.modelName.value.trim(),
+    apiKey: elements.modelApiKey.value.trim() || undefined,
+  };
+}
+
+function updateModelPreview() {
+  elements.modelFinalUrl.textContent = joinModelUrl(elements.modelBaseUrl.value, elements.modelEndpoint.value);
+}
+
+function setModelStatus(text, type = "") {
+  elements.modelStatusBadge.textContent = text;
+  elements.modelStatusBadge.className = `model-status-badge${type ? ` is-${type}` : ""}`;
+}
+
+function renderProviderCards() {
+  elements.modelProviders.replaceChildren();
+  state.modelProviders.forEach((provider) => {
+    const button = document.createElement("button");
+    button.className = "provider-card";
+    button.classList.toggle("is-active", provider.id === state.selectedProvider);
+    button.type = "button";
+    button.dataset.provider = provider.id;
+
+    const header = document.createElement("span");
+    header.className = "provider-card-title";
+    header.textContent = provider.name;
+
+    const badges = document.createElement("span");
+    badges.className = "provider-badges";
+    (provider.badges || []).forEach((badgeText) => {
+      const badge = document.createElement("small");
+      badge.textContent = badgeText;
+      badges.append(badge);
+    });
+
+    const description = document.createElement("span");
+    description.className = "provider-description";
+    description.textContent = provider.description || provider.domain || "";
+
+    button.append(header, badges, description);
+    button.addEventListener("click", () => applyProvider(provider));
+    elements.modelProviders.append(button);
+  });
+}
+
+function applyProvider(provider) {
+  state.selectedProvider = provider.id || "custom";
+  elements.modelApiType.value = provider.apiType || "chat_completions";
+  elements.modelBaseUrl.value = provider.baseUrl || "";
+  elements.modelEndpoint.value = provider.endpoint || endpointForApiType(elements.modelApiType.value);
+  elements.modelName.value = provider.defaultModel || "";
+  elements.modelApiKey.value = "";
+  renderProviderCards();
+  updateModelPreview();
+  setModelStatus("未测试");
+}
+
+function applyModelSettings(settings = {}) {
+  state.modelSettings = settings;
+  state.selectedProvider = settings.provider || "apixin_gpt";
+  elements.modelApiType.value = settings.apiType || "responses";
+  elements.modelBaseUrl.value = settings.baseUrl || "";
+  elements.modelEndpoint.value = settings.endpoint || endpointForApiType(elements.modelApiType.value);
+  elements.modelName.value = settings.model || "";
+  elements.modelApiKey.value = "";
+  elements.modelKeyHint.textContent = settings.hasApiKey ? `已保存 ${settings.apiKeyMasked || ""}` : "未保存";
+  renderProviderCards();
+  updateModelPreview();
+}
+
+function updateModelConfig(data = {}) {
+  state.modelProviders = Array.isArray(data.providers) ? data.providers : state.modelProviders;
+  state.modelApiTypes = data.apiTypes || state.modelApiTypes || {};
+  applyModelSettings(data.settings || {});
 }
 
 function normalizeLibrary(library = {}) {
@@ -633,7 +747,60 @@ async function refreshStatus() {
   const response = await fetch("/api/status");
   const data = await response.json();
   elements.savedCount.textContent = String(data.downloadedCount || 0);
+  updateModelConfig({
+    providers: data.modelProviders || [],
+    apiTypes: data.modelApiTypes || {},
+    settings: data.modelSettings || {},
+  });
   updateLibrary(data.library || {});
+}
+
+async function refreshModelSettings() {
+  const response = await fetch("/api/settings");
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error || "模型设置读取失败。");
+  }
+  updateModelConfig(data);
+}
+
+async function saveModelSettings() {
+  const originalText = elements.saveModel.textContent;
+  elements.saveModel.disabled = true;
+  elements.saveModel.textContent = "保存中";
+  try {
+    const data = await requestJson("/api/settings", { settings: currentModelForm() });
+    updateModelConfig(data);
+    setModelStatus("已保存", "success");
+    setMessage("模型设置已保存。", "success");
+  } catch (error) {
+    setModelStatus("保存失败", "error");
+    setMessage(error.message, "error");
+  } finally {
+    elements.saveModel.disabled = false;
+    elements.saveModel.textContent = originalText;
+  }
+}
+
+async function testModelConnection() {
+  const originalText = elements.testModel.textContent;
+  elements.testModel.disabled = true;
+  elements.testModel.textContent = "测试中";
+  setModelStatus("测试中");
+  try {
+    const data = await requestJson("/api/settings/test", { settings: currentModelForm() }, 60000);
+    setModelStatus("连接正常", "success");
+    const usageText = data.usage && Object.keys(data.usage).length
+      ? ` Usage: ${JSON.stringify(data.usage)}`
+      : "";
+    setMessage(`${data.message} 返回：${data.sample || "OK"}。${usageText}`, "success");
+  } catch (error) {
+    setModelStatus("测试失败", "error");
+    setMessage(error.message, "error");
+  } finally {
+    elements.testModel.disabled = false;
+    elements.testModel.textContent = originalText;
+  }
 }
 
 async function updatePaperLibrary(action, paper) {
@@ -980,6 +1147,14 @@ elements.exportFavoritesBib.addEventListener("click", () => exportFavorites("bib
 elements.exportFavoritesMarkdown.addEventListener("click", () => exportFavorites("markdown"));
 elements.refreshFavorites.addEventListener("click", refreshFavoritesMetadata);
 elements.clearHistory.addEventListener("click", clearHistory);
+elements.modelApiType.addEventListener("change", () => {
+  elements.modelEndpoint.value = endpointForApiType(elements.modelApiType.value);
+  updateModelPreview();
+});
+elements.modelBaseUrl.addEventListener("input", updateModelPreview);
+elements.modelEndpoint.addEventListener("input", updateModelPreview);
+elements.saveModel.addEventListener("click", saveModelSettings);
+elements.testModel.addEventListener("click", testModelConnection);
 elements.libraryTabs.forEach((button) => {
   button.addEventListener("click", () => {
     state.libraryView = button.dataset.libraryView || "favorites";
@@ -994,3 +1169,4 @@ renderExternalGateways();
 refreshStatus().catch(() => {
   setMessage("后端状态读取失败，请确认 Python 服务正在运行。", "error");
 });
+refreshModelSettings().catch(() => {});
