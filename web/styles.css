@@ -724,6 +724,35 @@ input[type="range"] {
   gap: 0.35rem;
 }
 
+.paper-editor {
+  display: grid;
+  gap: 0.38rem;
+}
+
+.paper-editor-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.38rem;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.76rem;
+}
+
+select.paper-editor-input,
+input.paper-editor-input {
+  min-height: 2rem;
+  padding: 0 0.48rem;
+}
+
+textarea.paper-editor-input {
+  resize: vertical;
+  min-height: 3.8rem;
+  padding: 0.45rem 0.48rem;
+  line-height: 1.45;
+}
+
 .library-item-action {
   display: inline-flex;
   align-items: center;

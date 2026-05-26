@@ -417,6 +417,30 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual("已有译文。", stored["favorites"][translated_key]["paper"]["translations"]["zh"]["text"])
         self.assertEqual("新译文。", stored["favorites"][missing_key]["paper"]["translations"]["zh"]["text"])
 
+    def test_update_paper_metadata_persists_status_note_and_tags(self):
+        key = app.paper_key(SAMPLE_PAPER)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            library_path = Path(tmpdir) / "library.json"
+            with patch.object(app, "LIBRARY_PATH", library_path):
+                app.update_library({"action": "favorite", "paper": SAMPLE_PAPER})
+                response = app.update_library({
+                    "action": "update-paper",
+                    "paperKey": key,
+                    "updates": {
+                        "readingStatus": "reading",
+                        "note": "Important for translation workflow.",
+                        "tags": "llm, education",
+                    },
+                })
+                stored = app.load_library()
+
+        paper = stored["favorites"][key]["paper"]
+        self.assertTrue(response["ok"])
+        self.assertEqual("reading", paper["readingStatus"])
+        self.assertEqual("Important for translation workflow.", paper["note"])
+        self.assertEqual(["llm", "education"], paper["tags"])
+        self.assertEqual(["llm", "education"], stored["papers"][key]["paper"]["tags"])
+
 
 if __name__ == "__main__":
     unittest.main()

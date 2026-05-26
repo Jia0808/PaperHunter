@@ -1328,6 +1328,31 @@ def update_library(payload: dict) -> dict:
             library["ignored"].pop(key, None)
         elif action == "clear-history":
             library["history"] = []
+        elif action == "update-paper":
+            existing = (
+                library.get("papers", {}).get(key)
+                or library.get("favorites", {}).get(key)
+                or library.get("ignored", {}).get(key)
+            )
+            base_paper = existing.get("paper") if isinstance(existing, dict) and isinstance(existing.get("paper"), dict) else {}
+            updates = payload.get("updates") if isinstance(payload.get("updates"), dict) else {}
+            merged = {**base_paper, **snapshot}
+            if "readingStatus" in updates:
+                merged["readingStatus"] = str(updates.get("readingStatus") or "")
+            if "note" in updates:
+                merged["note"] = str(updates.get("note") or "")
+            if "tags" in updates:
+                raw_tags = updates.get("tags")
+                if isinstance(raw_tags, str):
+                    merged["tags"] = [tag.strip() for tag in re.split(r"[,，]", raw_tags) if tag.strip()]
+                elif isinstance(raw_tags, list):
+                    merged["tags"] = raw_tags
+            updated_snapshot = paper_snapshot(merged)
+            library["papers"][key] = {"createdAt": (existing or {}).get("createdAt", now), "updatedAt": now, "paper": updated_snapshot}
+            for section in ("favorites", "ignored"):
+                if key in library.get(section, {}):
+                    library[section][key]["paper"] = updated_snapshot
+                    library[section][key]["updatedAt"] = now
         else:
             raise ValueError("不支持的资料库操作。")
 

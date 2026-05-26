@@ -102,6 +102,14 @@ const externalGateways = [
   },
 ];
 
+const readingStatusLabels = {
+  "": "未设置",
+  unread: "待读",
+  reading: "精读",
+  read: "已读",
+  to_translate: "待翻译",
+};
+
 const elements = {
   form: document.querySelector("#searchForm"),
   query: document.querySelector("#queryInput"),
@@ -504,6 +512,8 @@ function createLibraryItem(paper, view) {
 
   if (view === "favorites") {
     const translation = zhTranslation(paper);
+    const editor = createPaperEditor(paper);
+    item.append(editor);
     if (translation) {
       const translated = document.createElement("p");
       translated.className = `library-translation${translation.stale ? " is-stale" : ""}`;
@@ -523,6 +533,46 @@ function createLibraryItem(paper, view) {
 
   item.append(header, actions);
   return item;
+}
+
+function createPaperEditor(paper) {
+  const editor = document.createElement("div");
+  editor.className = "paper-editor";
+
+  const status = document.createElement("select");
+  status.className = "paper-editor-input";
+  Object.entries(readingStatusLabels).forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    status.append(option);
+  });
+  status.value = paper.readingStatus || "";
+
+  const tags = document.createElement("input");
+  tags.className = "paper-editor-input";
+  tags.type = "text";
+  tags.placeholder = "标签，用逗号分隔";
+  tags.value = Array.isArray(paper.tags) ? paper.tags.join(", ") : "";
+
+  const note = document.createElement("textarea");
+  note.className = "paper-editor-input";
+  note.rows = 2;
+  note.placeholder = "备注";
+  note.value = paper.note || "";
+
+  const save = document.createElement("button");
+  save.className = "library-item-action";
+  save.type = "button";
+  save.textContent = "保存管理信息";
+  save.addEventListener("click", () => updatePaperMetadata(paper, {
+    readingStatus: status.value,
+    tags: tags.value,
+    note: note.value,
+  }, save));
+
+  editor.append(status, tags, note, save);
+  return editor;
 }
 
 function renderLibraryItems() {
@@ -917,6 +967,28 @@ async function translateLibraryPaper(paper) {
 
 async function translateResultPaper(index, button) {
   await translatePaper(state.results[index], button);
+}
+
+async function updatePaperMetadata(paper, updates, button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中";
+  try {
+    const data = await requestJson("/api/library", {
+      action: "update-paper",
+      paper,
+      paperKey: paper.paperKey,
+      updates,
+    });
+    updateLibrary(data.library || {});
+    setMessage("阅读状态、标签和备注已保存。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 async function toggleFavorite(index, button) {
