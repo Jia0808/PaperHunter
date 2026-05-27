@@ -3,6 +3,7 @@ import unittest
 import io
 import json
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -514,59 +515,117 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(restored_pdf)
         self.assertTrue(restored_md)
 
-    def test_fulltext_translation_writes_markdown_and_index(self):
+    @contextmanager
+    def fulltext_test_context(self, root: Path, paper: dict, key: str, filename: str):
+        library_path = root / "library.json"
+        settings_path = root / "settings.json"
+        download_dir = root / "downloaded_papers"
+        translated_dir = root / "translated_papers"
+        task_dir = root / "data" / "fulltext_tasks"
+        download_dir.mkdir()
+        translated_dir.mkdir()
+        task_dir.mkdir(parents=True)
+        (download_dir / filename).write_bytes(b"%PDF test")
+        with (
+            patch.object(app, "LIBRARY_PATH", library_path),
+            patch.object(app, "SETTINGS_PATH", settings_path),
+            patch.object(app, "DOWNLOAD_DIR", download_dir),
+            patch.object(app, "TRANSLATED_DIR", translated_dir),
+            patch.object(app, "FULLTEXT_TASK_DIR", task_dir),
+        ):
+            yield
+
+    def save_fulltext_test_state(self, paper: dict, key: str, filename: str) -> None:
+        app.save_settings(app.normalize_settings({
+            "provider": "apixin_gpt",
+            "apiType": "responses",
+            "baseUrl": "https://example.test",
+            "endpoint": "/v1/responses",
+            "model": "gpt-test",
+            "apiKey": "sk-test",
+        }))
+        app.save_library({
+            "version": app.LIBRARY_SCHEMA_VERSION,
+            "papers": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": paper}},
+            "favorites": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": paper}},
+            "ignored": {},
+            "downloads": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "filename": filename, "paper": paper}},
+            "history": [],
+        })
+
+    def test_fulltext_task_writes_markdown_and_index(self):
         paper = app.paper_snapshot({**SAMPLE_PAPER, "paperId": "fulltext-1", "isDownloaded": True})
         key = app.paper_key(paper)
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            library_path = root / "library.json"
-            settings_path = root / "settings.json"
-            download_dir = root / "downloaded_papers"
-            translated_dir = root / "translated_papers"
-            download_dir.mkdir()
-            translated_dir.mkdir()
             filename = app.sanitize_filename(paper["title"], paper["paperId"])
-            (download_dir / filename).write_bytes(b"%PDF test")
-            with (
-                patch.object(app, "LIBRARY_PATH", library_path),
-                patch.object(app, "SETTINGS_PATH", settings_path),
-                patch.object(app, "DOWNLOAD_DIR", download_dir),
-                patch.object(app, "TRANSLATED_DIR", translated_dir),
-            ):
-                app.save_settings(app.normalize_settings({
-                    "provider": "apixin_gpt",
-                    "apiType": "responses",
-                    "baseUrl": "https://example.test",
-                    "endpoint": "/v1/responses",
-                    "model": "gpt-test",
-                    "apiKey": "sk-test",
-                }))
-                app.save_library({
-                    "version": app.LIBRARY_SCHEMA_VERSION,
-                    "papers": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": paper}},
-                    "favorites": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "paper": paper}},
-                    "ignored": {},
-                    "downloads": {key: {"createdAt": "2026-05-27T00:00:00+00:00", "filename": filename, "paper": paper}},
-                    "history": [],
-                })
+            with self.fulltext_test_context(root, paper, key, filename):
+                self.save_fulltext_test_state(paper, key, filename)
                 with (
-                    patch.object(app, "extract_pdf_text", return_value="First paragraph. Second paragraph."),
-                    patch.object(app, "invoke_model_text", return_value=("第一段。第二段。", {"total_tokens": 20})),
+                    patch.object(app, "extract_pdf_text", return_value="First paragraph. Second paragraph. Third paragraph."),
+                    patch.object(app, "invoke_model_text", return_value=("译文片段。", {"total_tokens": 20})),
                 ):
-                    response = app.translate_fulltext({"paper": paper, "paperKey": key})
+                    response = app.new_fulltext_task({"paper": paper, "paperKey": key, "chunkSize": 20})
+                    app.run_fulltext_task(response["taskId"])
+                task = app.load_fulltext_task(response["taskId"])
                 stored = app.load_library()
-                output_path = translated_dir / response["filename"]
+                output_path = root / (task["file"].replace("/", "\\"))
                 output_exists = output_path.exists()
                 content = output_path.read_text(encoding="utf-8")
 
-        self.assertTrue(response["ok"])
+        self.assertEqual("done", task["status"])
         self.assertTrue(output_exists)
         self.assertIn("### English", content)
         self.assertIn("### 中文", content)
-        self.assertIn("第一段。第二段。", content)
+        self.assertIn("译文片段。", content)
         index = stored["favorites"][key]["paper"]["fulltextTranslations"][0]
         self.assertEqual("fulltext", index["type"])
         self.assertTrue(index["file"].endswith(".bilingual.md"))
+
+    def test_fulltext_task_can_resume_failed_chunk(self):
+        paper = app.paper_snapshot({**SAMPLE_PAPER, "paperId": "fulltext-resume", "isDownloaded": True})
+        key = app.paper_key(paper)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            filename = app.sanitize_filename(paper["title"], paper["paperId"])
+            with self.fulltext_test_context(root, paper, key, filename):
+                self.save_fulltext_test_state(paper, key, filename)
+                source_text = " ".join(f"Sentence {index}." for index in range(160))
+                with patch.object(app, "extract_pdf_text", return_value=source_text):
+                    task = app.new_fulltext_task({"paper": paper, "paperKey": key, "chunkSize": 500})
+                calls = {"count": 0}
+
+                def flaky_translate(*args, **kwargs):
+                    calls["count"] += 1
+                    if calls["count"] == 2:
+                        raise TimeoutError("temporary timeout")
+                    return (f"译文 {calls['count']}", {"total_tokens": 1})
+
+                with patch.object(app, "invoke_model_text", side_effect=flaky_translate):
+                    app.run_fulltext_task(task["taskId"])
+                failed = app.load_fulltext_task(task["taskId"])
+                self.assertEqual("failed", failed["status"])
+                self.assertEqual("done", failed["chunks"][0]["status"])
+                self.assertEqual("failed", failed["chunks"][1]["status"])
+
+                with patch.object(app, "invoke_model_text", return_value=("续跑译文", {"total_tokens": 2})):
+                    app.run_fulltext_task(task["taskId"])
+                resumed = app.load_fulltext_task(task["taskId"])
+
+        self.assertEqual("done", resumed["status"])
+        self.assertTrue(resumed["file"].endswith(".bilingual.md"))
+        self.assertTrue(all(chunk["status"] == "done" for chunk in resumed["chunks"]))
+
+    def test_fulltext_export_rejects_missing_chunk(self):
+        task = {
+            "chunks": [
+                {"index": 1, "status": "done", "source": "A", "translation": "甲"},
+                {"index": 3, "status": "done", "source": "C", "translation": "丙"},
+            ]
+        }
+
+        with self.assertRaises(RuntimeError):
+            app.completed_fulltext_chunks(task)
 
 
 if __name__ == "__main__":

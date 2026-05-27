@@ -15,7 +15,7 @@ from email.utils import parsedate_to_datetime
 from html import unescape
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import RLock
+from threading import RLock, Thread
 from urllib.parse import unquote, urljoin, urlparse
 
 import arxiv
@@ -28,10 +28,12 @@ DOWNLOAD_DIR = ROOT_DIR / "downloaded_papers"
 TRANSLATED_DIR = ROOT_DIR / "translated_papers"
 CACHE_DIR = ROOT_DIR / ".cache"
 DATA_DIR = ROOT_DIR / "data"
+FULLTEXT_TASK_DIR = DATA_DIR / "fulltext_tasks"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 TRANSLATED_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 DATA_DIR.mkdir(exist_ok=True)
+FULLTEXT_TASK_DIR.mkdir(exist_ok=True)
 
 HOST = "127.0.0.1"
 PORT = 8000
@@ -132,6 +134,12 @@ LIBRARY_SCHEMA_VERSION = 3
 SETTINGS_SCHEMA_VERSION = 1
 TRANSLATION_PROMPT_VERSION = "abstract-zh-v1"
 MAX_SEARCH_HISTORY = 30
+FULLTEXT_TASK_SCHEMA_VERSION = 1
+FULLTEXT_PROMPT_VERSION = "fulltext-zh-v2"
+FULLTEXT_CHUNK_SIZE = 1400
+FULLTEXT_MODEL_READ_TIMEOUT_SECONDS = 120
+FULLTEXT_TASK_THREADS: dict[str, Thread] = {}
+FULLTEXT_TASK_LOCK = RLock()
 API_TYPE_ENDPOINTS = {
     "responses": "/v1/responses",
     "chat_completions": "/v1/chat/completions",
@@ -373,6 +381,10 @@ def contains_any_term(text: str, terms: str) -> bool:
 
 def request_timeout(read_timeout: int = READ_TIMEOUT_SECONDS) -> tuple[int, int]:
     return (CONNECT_TIMEOUT_SECONDS, read_timeout)
+
+
+def model_request_timeout(read_timeout: int = 30) -> tuple[int, int]:
+    return (CONNECT_TIMEOUT_SECONDS, max(1, read_timeout))
 
 
 def join_url(base_url: str, endpoint: str) -> str:
@@ -628,6 +640,96 @@ def save_library(library: dict) -> None:
         tmp_path.replace(LIBRARY_PATH)
 
 
+def task_storage_dir() -> Path:
+    FULLTEXT_TASK_DIR.mkdir(parents=True, exist_ok=True)
+    return FULLTEXT_TASK_DIR
+
+
+def safe_task_id(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip("-")[:140]
+
+
+def fulltext_task_id(key: str) -> str:
+    return safe_task_id(f"fulltext-{key}") or "fulltext-paper"
+
+
+def fulltext_task_path(task_id: str) -> Path:
+    safe_id = safe_task_id(task_id)
+    if not safe_id:
+        raise ValueError("Missing fulltext translation task ID.")
+    path = (task_storage_dir() / f"{safe_id}.json").resolve()
+    if task_storage_dir().resolve() not in path.parents and path != task_storage_dir().resolve():
+        raise ValueError("Unsafe fulltext translation task path.")
+    return path
+
+
+def load_fulltext_task(task_id: str) -> dict | None:
+    path = fulltext_task_path(task_id)
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_fulltext_task(task: dict) -> None:
+    with FULLTEXT_TASK_LOCK:
+        path = fulltext_task_path(str(task.get("taskId") or ""))
+        tmp_path = path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as file:
+            json.dump(task, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        tmp_path.replace(path)
+
+
+def fulltext_thread_alive(task_id: str) -> bool:
+    with FULLTEXT_TASK_LOCK:
+        thread = FULLTEXT_TASK_THREADS.get(task_id)
+        return bool(thread and thread.is_alive())
+
+
+def public_fulltext_task(task: dict) -> dict:
+    chunks = [chunk for chunk in task.get("chunks", []) if isinstance(chunk, dict)]
+    total = len(chunks)
+    completed = sum(1 for chunk in chunks if chunk.get("status") == "done" and chunk.get("translation"))
+    failed = sum(1 for chunk in chunks if chunk.get("status") == "failed")
+    current = next((chunk.get("index") for chunk in chunks if chunk.get("status") == "running"), None)
+    task_id = str(task.get("taskId") or "")
+    status = str(task.get("status") or "queued")
+    if status in {"running", "queued"} and task_id and not fulltext_thread_alive(task_id):
+        status = "partial"
+    return {
+        "taskId": task_id,
+        "paperKey": task.get("paperKey", ""),
+        "title": task.get("title", ""),
+        "status": status,
+        "totalChunks": total,
+        "completedChunks": completed,
+        "failedChunks": failed,
+        "currentChunk": current,
+        "canResume": bool(status in {"failed", "partial"}),
+        "createdAt": task.get("createdAt", ""),
+        "updatedAt": task.get("updatedAt", ""),
+        "startedAt": task.get("startedAt", ""),
+        "finishedAt": task.get("finishedAt", ""),
+        "file": task.get("file", ""),
+        "filename": task.get("filename", ""),
+        "error": task.get("error", ""),
+        "usage": task.get("usage", {}),
+        "chunkSize": task.get("chunkSize", FULLTEXT_CHUNK_SIZE),
+    }
+
+
+def fulltext_task_for_paper(key: str) -> dict | None:
+    task = load_fulltext_task(fulltext_task_id(key))
+    if not task or task.get("paperKey") != key:
+        return None
+    return public_fulltext_task(task)
+
+
 def empty_settings() -> dict:
     preset = provider_preset("apixin_gpt")
     return {
@@ -788,12 +890,12 @@ def normalize_model_error(exc: Exception) -> str:
     return compact_text(str(exc), 260) or "测试连接失败。"
 
 
-def post_model_json(url: str, headers: dict, body: dict) -> dict:
+def post_model_json(url: str, headers: dict, body: dict, read_timeout: int = 30) -> dict:
     response = requests.post(
         url,
         headers=headers,
         json=body,
-        timeout=request_timeout(30),
+        timeout=model_request_timeout(read_timeout),
     )
     response.raise_for_status()
     try:
@@ -873,7 +975,7 @@ def model_headers(settings: dict) -> dict:
     }
 
 
-def invoke_model_text(settings: dict, prompt: str, max_tokens: int = 900) -> tuple[str, dict]:
+def invoke_model_text(settings: dict, prompt: str, max_tokens: int = 900, read_timeout: int = 30) -> tuple[str, dict]:
     api_type = normalize_api_type(settings.get("apiType"))
     url = join_url(settings["baseUrl"], settings["endpoint"])
     if api_type == "responses":
@@ -885,6 +987,7 @@ def invoke_model_text(settings: dict, prompt: str, max_tokens: int = 900) -> tup
                 "input": prompt,
                 "max_output_tokens": max_tokens,
             },
+            read_timeout=read_timeout,
         )
         text = extract_responses_text(data)
     elif api_type == "anthropic_messages":
@@ -896,6 +999,7 @@ def invoke_model_text(settings: dict, prompt: str, max_tokens: int = 900) -> tup
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
             },
+            read_timeout=read_timeout,
         )
         text = extract_anthropic_text(data)
     else:
@@ -908,6 +1012,7 @@ def invoke_model_text(settings: dict, prompt: str, max_tokens: int = 900) -> tup
                 "max_tokens": max_tokens,
                 "temperature": 0.2,
             },
+            read_timeout=read_timeout,
         )
         text = extract_chat_completion_text(data)
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
@@ -1116,7 +1221,7 @@ def extract_pdf_text(pdf_path: Path, max_pages: int = 12) -> str:
     return extracted
 
 
-def split_text_chunks(text: str, size: int = 3200) -> list[str]:
+def split_text_chunks(text: str, size: int = FULLTEXT_CHUNK_SIZE) -> list[str]:
     normalized = clean_html(text)
     chunks = []
     while normalized:
@@ -1129,10 +1234,26 @@ def split_text_chunks(text: str, size: int = 3200) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+def fulltext_chunk_items(text: str, size: int = FULLTEXT_CHUNK_SIZE, max_chunks: int = 30) -> list[dict]:
+    return [
+        {
+            "index": index,
+            "source": chunk,
+            "sourceHash": stable_text_hash(chunk),
+            "status": "pending",
+            "translation": "",
+            "usage": {},
+            "error": "",
+        }
+        for index, chunk in enumerate(split_text_chunks(text, size=size)[:max_chunks], start=1)
+    ]
+
+
 def fulltext_translation_prompt(title: str, chunk: str, index: int, total: int) -> str:
     return (
         "你是严谨的学术论文全文翻译助手。请把下面论文正文片段翻译为简体中文。\n"
-        "要求：保留公式、变量、引用编号和专有名词；不要添加原文没有的信息；只输出中文译文。\n\n"
+        "要求：保留公式、变量、引用编号和专有名词；不要添加原文没有的信息；"
+        "保持本片段与上下文的术语和代词连续；只输出中文译文。\n\n"
         f"论文标题：{title}\n"
         f"片段：{index}/{total}\n\n"
         f"英文正文片段：\n{chunk}"
@@ -1172,6 +1293,37 @@ def write_fulltext_markdown(paper: dict, filename: str, chunks: list[str], trans
     return output_path
 
 
+def completed_fulltext_chunks(task: dict) -> list[dict]:
+    chunks = [chunk for chunk in task.get("chunks", []) if isinstance(chunk, dict)]
+    if not chunks:
+        raise RuntimeError("全文翻译任务没有可导出的片段。")
+    ordered = sorted(chunks, key=lambda chunk: int(chunk.get("index") or 0))
+    expected = list(range(1, len(ordered) + 1))
+    actual = [int(chunk.get("index") or 0) for chunk in ordered]
+    if actual != expected:
+        raise RuntimeError("全文翻译片段编号不连续，已停止导出。")
+    missing = [
+        str(chunk.get("index"))
+        for chunk in ordered
+        if chunk.get("status") != "done" or not str(chunk.get("translation") or "").strip()
+    ]
+    if missing:
+        raise RuntimeError(f"全文翻译还有未完成片段：{', '.join(missing)}。")
+    return ordered
+
+
+def write_fulltext_task_markdown(task: dict) -> Path:
+    chunks = completed_fulltext_chunks(task)
+    sources = [str(chunk.get("source") or "") for chunk in chunks]
+    translations = [str(chunk.get("translation") or "") for chunk in chunks]
+    return write_fulltext_markdown(
+        task.get("paper") if isinstance(task.get("paper"), dict) else {},
+        str(task.get("sourceFilename") or ""),
+        sources,
+        translations,
+    )
+
+
 def translated_relative_path(path: Path) -> str:
     try:
         return path.relative_to(ROOT_DIR).as_posix()
@@ -1209,13 +1361,10 @@ def update_fulltext_translation_index(library: dict, key: str, paper: dict, outp
             library[section][key]["updatedAt"] = now
 
 
-def translate_fulltext(payload: dict) -> dict:
+def new_fulltext_task(payload: dict) -> dict:
     paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
     if not paper:
         raise ValueError("缺少论文数据。")
-    settings = load_settings()
-    if not settings.get("baseUrl") or not settings.get("model") or not settings.get("apiKey"):
-        raise ValueError("请先在模型设置中配置 Base URL、Model 和 API Key。")
 
     key = str(payload.get("paperKey") or paper.get("paperKey") or paper_key(paper)).strip()
     with LIBRARY_LOCK:
@@ -1223,32 +1372,199 @@ def translate_fulltext(payload: dict) -> dict:
         filename, pdf_path = find_download_record(library, key, paper)
 
     text = extract_pdf_text(pdf_path, max_pages=clamp_int(payload.get("maxPages"), 12, 1, 30))
-    chunks = split_text_chunks(text)[: clamp_int(payload.get("maxChunks"), 8, 1, 30)]
-    translations = []
-    total_usage: dict[str, int] = {}
-    title = clean_html(str(paper.get("title") or "Untitled"))
-    for index, chunk in enumerate(chunks, start=1):
-        translated, usage = invoke_model_text(settings, fulltext_translation_prompt(title, chunk, index, len(chunks)), max_tokens=1800)
-        translations.append(translated)
-        for usage_key, value in usage.items():
-            if isinstance(value, int):
-                total_usage[usage_key] = total_usage.get(usage_key, 0) + value
+    chunk_size = clamp_int(payload.get("chunkSize"), FULLTEXT_CHUNK_SIZE, 500, 2400)
+    max_chunks = clamp_int(payload.get("maxChunks"), 30, 1, 80)
+    chunks = fulltext_chunk_items(text, size=chunk_size, max_chunks=max_chunks)
+    if not chunks:
+        raise RuntimeError("PDF 没有可翻译的正文片段。")
 
-    output_path = write_fulltext_markdown(paper, filename, chunks, translations)
-    with LIBRARY_LOCK:
-        library = load_library()
-        update_fulltext_translation_index(library, key, paper, output_path, settings.get("model", ""))
-        save_library(library)
-        library_view = compact_library(library)
+    now = now_iso()
+    settings = load_settings()
+    task = {
+        "version": FULLTEXT_TASK_SCHEMA_VERSION,
+        "taskId": fulltext_task_id(key),
+        "paperKey": key,
+        "paper": paper_snapshot(paper),
+        "title": clean_html(str(paper.get("title") or "Untitled")),
+        "sourceFilename": filename,
+        "sourceTextHash": stable_text_hash(text),
+        "chunkSize": chunk_size,
+        "maxPages": clamp_int(payload.get("maxPages"), 12, 1, 30),
+        "promptVersion": FULLTEXT_PROMPT_VERSION,
+        "status": "queued",
+        "createdAt": now,
+        "updatedAt": now,
+        "startedAt": "",
+        "finishedAt": "",
+        "file": "",
+        "filename": "",
+        "error": "",
+        "usage": {},
+        "settings": {
+            "provider": settings.get("provider", ""),
+            "apiType": settings.get("apiType", ""),
+            "model": settings.get("model", ""),
+        },
+        "chunks": chunks,
+    }
+    save_fulltext_task(task)
+    return task
 
+
+def reusable_fulltext_task(payload: dict) -> dict:
+    paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
+    key = str(payload.get("paperKey") or paper.get("paperKey") or paper_key(paper)).strip()
+    task_id = str(payload.get("taskId") or fulltext_task_id(key))
+    force = bool(payload.get("force"))
+    existing = None if force else load_fulltext_task(task_id)
+    if existing and existing.get("paperKey") == key:
+        if existing.get("status") in {"running", "queued", "done", "failed", "partial"}:
+            return existing
+    return new_fulltext_task(payload)
+
+
+def merge_usage(total: dict, usage: dict) -> dict:
+    for usage_key, value in (usage or {}).items():
+        if isinstance(value, int):
+            total[usage_key] = total.get(usage_key, 0) + value
+    return total
+
+
+def mark_fulltext_task_failed(task: dict, message: str) -> dict:
+    task["status"] = "failed"
+    task["error"] = compact_text(message, 500)
+    task["updatedAt"] = now_iso()
+    save_fulltext_task(task)
+    return task
+
+
+def run_fulltext_task(task_id: str) -> None:
+    task = load_fulltext_task(task_id)
+    if not task:
+        return
+
+    settings = load_settings()
+    if not settings.get("baseUrl") or not settings.get("model") or not settings.get("apiKey"):
+        mark_fulltext_task_failed(task, "请先在模型设置中配置 Base URL、Model 和 API Key。")
+        return
+
+    task["status"] = "running"
+    task["error"] = ""
+    task["startedAt"] = task.get("startedAt") or now_iso()
+    task["updatedAt"] = now_iso()
+    save_fulltext_task(task)
+
+    chunks = [chunk for chunk in task.get("chunks", []) if isinstance(chunk, dict)]
+    total = len(chunks)
+    title = str(task.get("title") or "Untitled")
+    usage_total = task.get("usage") if isinstance(task.get("usage"), dict) else {}
+
+    try:
+        for chunk in chunks:
+            if chunk.get("status") == "done" and chunk.get("translation"):
+                continue
+
+            chunk["status"] = "running"
+            chunk["error"] = ""
+            task["updatedAt"] = now_iso()
+            save_fulltext_task(task)
+
+            index = clamp_int(chunk.get("index"), 1, 1, max(total, 1))
+            try:
+                translated, usage = invoke_model_text(
+                    settings,
+                    fulltext_translation_prompt(title, str(chunk.get("source") or ""), index, total),
+                    max_tokens=1400,
+                    read_timeout=FULLTEXT_MODEL_READ_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                chunk["status"] = "failed"
+                chunk["error"] = compact_text(normalize_model_error(exc), 500)
+                task["status"] = "failed"
+                task["error"] = f"片段 {index} 翻译失败：{chunk['error']}"
+                task["updatedAt"] = now_iso()
+                save_fulltext_task(task)
+                return
+
+            if not translated:
+                chunk["status"] = "failed"
+                chunk["error"] = "模型没有返回译文。"
+                task["status"] = "failed"
+                task["error"] = f"片段 {index} 翻译失败：模型没有返回译文。"
+                task["updatedAt"] = now_iso()
+                save_fulltext_task(task)
+                return
+
+            chunk["translation"] = translated
+            chunk["usage"] = usage
+            chunk["status"] = "done"
+            chunk["translatedAt"] = now_iso()
+            usage_total = merge_usage(usage_total, usage)
+            task["usage"] = usage_total
+            task["updatedAt"] = now_iso()
+            save_fulltext_task(task)
+
+        output_path = write_fulltext_task_markdown(task)
+        with LIBRARY_LOCK:
+            library = load_library()
+            paper = task.get("paper") if isinstance(task.get("paper"), dict) else {}
+            update_fulltext_translation_index(library, str(task.get("paperKey") or ""), paper, output_path, settings.get("model", ""))
+            save_library(library)
+
+        task["status"] = "done"
+        task["file"] = translated_relative_path(output_path)
+        task["filename"] = output_path.name
+        task["finishedAt"] = now_iso()
+        task["updatedAt"] = task["finishedAt"]
+        task["error"] = ""
+        save_fulltext_task(task)
+    finally:
+        with FULLTEXT_TASK_LOCK:
+            FULLTEXT_TASK_THREADS.pop(task_id, None)
+
+
+def ensure_fulltext_task_running(task: dict) -> bool:
+    task_id = str(task.get("taskId") or "")
+    if not task_id:
+        return False
+    if task.get("status") == "done":
+        return False
+    with FULLTEXT_TASK_LOCK:
+        thread = FULLTEXT_TASK_THREADS.get(task_id)
+        if thread and thread.is_alive():
+            return True
+        task["status"] = "queued"
+        task["updatedAt"] = now_iso()
+        save_fulltext_task(task)
+        thread = Thread(target=run_fulltext_task, args=(task_id,), daemon=True)
+        FULLTEXT_TASK_THREADS[task_id] = thread
+        thread.start()
+        return True
+
+
+def translate_fulltext(payload: dict) -> dict:
+    task = reusable_fulltext_task(payload)
+    ensure_fulltext_task_running(task)
     return {
         "ok": True,
-        "paperKey": key,
-        "filename": output_path.name,
-        "file": translated_relative_path(output_path),
-        "chunks": len(chunks),
-        "usage": total_usage,
-        "library": library_view,
+        "task": public_fulltext_task(load_fulltext_task(str(task.get("taskId"))) or task),
+        "library": compact_library(load_library()),
+    }
+
+
+def fulltext_task_status(payload: dict) -> dict:
+    task_id = str(payload.get("taskId") or "")
+    if not task_id:
+        paper = payload.get("paper") if isinstance(payload.get("paper"), dict) else {}
+        key = str(payload.get("paperKey") or paper.get("paperKey") or paper_key(paper)).strip()
+        task_id = fulltext_task_id(key)
+    task = load_fulltext_task(task_id)
+    if not task:
+        raise ValueError("未找到全文翻译任务。")
+    return {
+        "ok": True,
+        "task": public_fulltext_task(task),
+        "library": compact_library(load_library()),
     }
 
 
@@ -1262,13 +1578,19 @@ def compact_library(library: dict) -> dict:
                 "paperKey": key,
                 "favoritedAt": item.get("createdAt", ""),
                 "refreshedAt": item.get("refreshedAt", ""),
+                "fulltextTask": fulltext_task_for_paper(key),
             })
 
     ignored = []
     for key, item in (library.get("ignored") or {}).items():
         if isinstance(item, dict):
             paper = item.get("paper") if isinstance(item.get("paper"), dict) else {}
-            ignored.append({**paper, "paperKey": key, "ignoredAt": item.get("createdAt", "")})
+            ignored.append({
+                **paper,
+                "paperKey": key,
+                "ignoredAt": item.get("createdAt", ""),
+                "fulltextTask": fulltext_task_for_paper(key),
+            })
 
     favorites.sort(key=lambda paper: str(paper.get("favoritedAt", "")), reverse=True)
     ignored.sort(key=lambda paper: str(paper.get("ignoredAt", "")), reverse=True)
@@ -2824,7 +3146,13 @@ def backup_manifest() -> dict:
         "createdAt": now_iso(),
         "librarySchemaVersion": LIBRARY_SCHEMA_VERSION,
         "settingsSchemaVersion": SETTINGS_SCHEMA_VERSION,
-        "includes": ["data/library.json", "data/settings.json", "downloaded_papers/", "translated_papers/"],
+        "includes": [
+            "data/library.json",
+            "data/settings.json",
+            "data/fulltext_tasks/",
+            "downloaded_papers/",
+            "translated_papers/",
+        ],
         "apiKeyExported": False,
     }
 
@@ -2849,6 +3177,7 @@ def export_workspace_backup() -> tuple[bytes, str]:
         zip_file.writestr("paperhunter-backup.json", json.dumps(backup_manifest(), ensure_ascii=False, indent=2))
         zip_file.writestr("data/library.json", json.dumps(load_library(), ensure_ascii=False, indent=2))
         zip_file.writestr("data/settings.json", json.dumps(settings_without_api_key(load_settings()), ensure_ascii=False, indent=2))
+        add_dir_to_zip(zip_file, FULLTEXT_TASK_DIR, "data/fulltext_tasks")
         add_dir_to_zip(zip_file, DOWNLOAD_DIR, "downloaded_papers")
         add_dir_to_zip(zip_file, TRANSLATED_DIR, "translated_papers")
     filename = f"paperhunter-workspace-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
@@ -2875,7 +3204,7 @@ def extract_backup_zip(zip_bytes: bytes, strategy: str = "merge") -> dict:
         if not isinstance(manifest, dict) or manifest.get("app") != "PaperHunter":
             raise ValueError("备份包 manifest 不正确。")
 
-        imported = {"library": False, "settings": False, "downloaded": 0, "translated": 0}
+        imported = {"library": False, "settings": False, "tasks": 0, "downloaded": 0, "translated": 0}
         if "data/library.json" in names and strategy != "skip":
             backup_library = migrate_library(json.loads(zip_file.read("data/library.json").decode("utf-8")))
             if strategy == "overwrite":
@@ -2899,7 +3228,12 @@ def extract_backup_zip(zip_bytes: bytes, strategy: str = "merge") -> dict:
             if name.endswith("/") or name in {"paperhunter-backup.json", "data/library.json", "data/settings.json"}:
                 continue
             target_root = None
-            if name.startswith("downloaded_papers/"):
+            prefix_offset = 1
+            if name.startswith("data/fulltext_tasks/"):
+                target_root = FULLTEXT_TASK_DIR
+                counter = "tasks"
+                prefix_offset = 2
+            elif name.startswith("downloaded_papers/"):
                 target_root = DOWNLOAD_DIR
                 counter = "downloaded"
             elif name.startswith("translated_papers/"):
@@ -2907,7 +3241,7 @@ def extract_backup_zip(zip_bytes: bytes, strategy: str = "merge") -> dict:
                 counter = "translated"
             else:
                 continue
-            relative = Path(*Path(name).parts[1:])
+            relative = Path(*Path(name).parts[prefix_offset:])
             target = (target_root / relative).resolve()
             if target_root.resolve() not in target.parents and target != target_root.resolve():
                 raise ValueError("备份包路径校验失败。")
@@ -3017,6 +3351,9 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
                 return
             if self.path.startswith("/api/translate/batch"):
                 self.send_json(batch_translate_abstracts(payload))
+                return
+            if self.path.startswith("/api/translate/fulltext/status"):
+                self.send_json(fulltext_task_status(payload))
                 return
             if self.path.startswith("/api/translate/fulltext"):
                 self.send_json(translate_fulltext(payload))

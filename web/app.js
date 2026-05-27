@@ -7,6 +7,8 @@ const state = {
   modelApiTypes: {},
   modelSettings: null,
   selectedProvider: "apixin_gpt",
+  fulltextTasks: {},
+  fulltextPollers: {},
   library: {
     favorites: [],
     ignored: [],
@@ -450,9 +452,16 @@ function updateModelConfig(data = {}) {
 }
 
 function normalizeLibrary(library = {}) {
+  const favorites = Array.isArray(library.favorites) ? library.favorites : [];
+  const ignored = Array.isArray(library.ignored) ? library.ignored : [];
+  [...favorites, ...ignored].forEach((paper) => {
+    if (paper && paper.paperKey && paper.fulltextTask) {
+      state.fulltextTasks[paper.paperKey] = paper.fulltextTask;
+    }
+  });
   return {
-    favorites: Array.isArray(library.favorites) ? library.favorites : [],
-    ignored: Array.isArray(library.ignored) ? library.ignored : [],
+    favorites,
+    ignored,
     history: Array.isArray(library.history) ? library.history : [],
     favoriteKeys: Array.isArray(library.favoriteKeys) ? library.favoriteKeys : [],
     ignoredKeys: Array.isArray(library.ignoredKeys) ? library.ignoredKeys : [],
@@ -482,6 +491,88 @@ function createLibraryAction(label, handler, disabled = false) {
   button.disabled = disabled;
   button.addEventListener("click", handler);
   return button;
+}
+
+function fulltextTaskForPaper(paper) {
+  return state.fulltextTasks[paper.paperKey || ""];
+}
+
+function fulltextProgressPercent(task) {
+  const total = Number(task && task.totalChunks) || 0;
+  if (!total) {
+    return 0;
+  }
+  return Math.round(((Number(task.completedChunks) || 0) / total) * 100);
+}
+
+function fulltextActionLabel(paper) {
+  const task = fulltextTaskForPaper(paper);
+  if (!task) {
+    return "全文翻译";
+  }
+  if (task.status === "done") {
+    return "重新全文翻译";
+  }
+  if (task.status === "failed" || task.canResume) {
+    return "继续全文翻译";
+  }
+  if (task.status === "running" || task.status === "queued") {
+    return "翻译中";
+  }
+  return "全文翻译";
+}
+
+function fulltextActionDisabled(paper) {
+  const task = fulltextTaskForPaper(paper);
+  return !paper.isDownloaded || Boolean(task && ["running", "queued"].includes(task.status));
+}
+
+function createFulltextProgress(paper) {
+  const task = fulltextTaskForPaper(paper);
+  if (!task) {
+    return null;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = `fulltext-task is-${task.status || "queued"}`;
+
+  const header = document.createElement("div");
+  header.className = "fulltext-task-header";
+
+  const status = document.createElement("span");
+  const total = Number(task.totalChunks) || 0;
+  const done = Number(task.completedChunks) || 0;
+  const failed = Number(task.failedChunks) || 0;
+  status.textContent = task.status === "done"
+    ? `全文翻译完成 ${done}/${total}`
+    : (task.status === "failed" || task.status === "partial")
+      ? `全文翻译暂停 ${done}/${total}${failed ? `，失败 ${failed}` : ""}`
+      : `全文翻译进行中 ${done}/${total}`;
+
+  const percent = document.createElement("strong");
+  percent.textContent = `${fulltextProgressPercent(task)}%`;
+  header.append(status, percent);
+
+  const track = document.createElement("div");
+  track.className = "fulltext-progress";
+  const bar = document.createElement("span");
+  bar.style.width = `${fulltextProgressPercent(task)}%`;
+  track.append(bar);
+
+  wrap.append(header, track);
+
+  if (task.error) {
+    const error = document.createElement("p");
+    error.className = "fulltext-task-error";
+    error.textContent = task.error;
+    wrap.append(error);
+  } else if (task.file) {
+    const file = document.createElement("p");
+    file.className = "fulltext-task-file";
+    file.textContent = task.file;
+    wrap.append(file);
+  }
+  return wrap;
 }
 
 function createLibraryItem(paper, view) {
@@ -522,10 +613,14 @@ function createLibraryItem(paper, view) {
       translated.textContent = translation.stale ? `译文可能已过期：${translation.text}` : translation.text;
       item.append(translated);
     }
+    const fulltextProgress = createFulltextProgress(paper);
+    if (fulltextProgress) {
+      item.append(fulltextProgress);
+    }
     actions.append(
       createLibraryAction("下载", () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
       createLibraryAction(translation ? "重译摘要" : "翻译摘要", () => translateLibraryPaper(paper)),
-      createLibraryAction("全文翻译", () => translateFulltextPaper(paper), !paper.isDownloaded),
+      createLibraryAction(fulltextActionLabel(paper), () => translateFulltextPaper(paper), fulltextActionDisabled(paper)),
       createLibraryAction("BibTeX", () => copyLibraryPaperExport(paper, "bibtex")),
       createLibraryAction("Markdown", () => copyLibraryPaperExport(paper, "markdown")),
       createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
@@ -997,15 +1092,73 @@ async function translateResultPaper(index, button) {
   await translatePaper(state.results[index], button);
 }
 
+function rememberFulltextTask(task) {
+  if (!task || !task.paperKey) {
+    return;
+  }
+  state.fulltextTasks[task.paperKey] = task;
+  renderLibrary();
+}
+
+function stopFulltextPolling(paperKey) {
+  const timer = state.fulltextPollers[paperKey];
+  if (timer) {
+    window.clearInterval(timer);
+    delete state.fulltextPollers[paperKey];
+  }
+}
+
+async function pollFulltextTask(task, paper) {
+  if (!task || !task.taskId || !paper || !paper.paperKey) {
+    return;
+  }
+
+  stopFulltextPolling(paper.paperKey);
+  const poll = async () => {
+    try {
+      const data = await requestJson("/api/translate/fulltext/status", {
+        taskId: task.taskId,
+        paperKey: paper.paperKey,
+      }, 20000);
+      rememberFulltextTask(data.task);
+      if (data.library) {
+        updateLibrary(data.library);
+      }
+
+      const current = data.task || {};
+      if (current.status === "done") {
+        stopFulltextPolling(paper.paperKey);
+        await refreshStatus();
+        setMessage(`全文翻译完成：${current.file || current.filename}。已确认所有片段连续写入。`, "success");
+        renderResults();
+      } else if (current.status === "failed") {
+        stopFulltextPolling(paper.paperKey);
+        setMessage(`全文翻译暂停，可点击“继续全文翻译”续跑。${current.error || ""}`, "error");
+      }
+    } catch (error) {
+      stopFulltextPolling(paper.paperKey);
+      setMessage(error.message, "error");
+    }
+  };
+
+  await poll();
+  if (state.fulltextTasks[paper.paperKey] && ["queued", "running"].includes(state.fulltextTasks[paper.paperKey].status)) {
+    state.fulltextPollers[paper.paperKey] = window.setInterval(poll, 2000);
+  }
+}
+
 async function translateFulltextPaper(paper) {
-  setMessage("正在进行全文翻译实验处理，可能需要较长时间...");
+  if (!paper) {
+    return;
+  }
+  const existingTask = fulltextTaskForPaper(paper);
+  const force = Boolean(existingTask && existingTask.status === "done");
+  setMessage("已启动全文翻译任务，会逐块翻译并校验片段连续性。");
   try {
-    const data = await requestJson("/api/translate/fulltext", { paper, paperKey: paper.paperKey }, 240000);
+    const data = await requestJson("/api/translate/fulltext", { paper, paperKey: paper.paperKey, force }, 30000);
+    rememberFulltextTask(data.task);
     updateLibrary(data.library || state.library);
-    const usageText = data.usage && Object.keys(data.usage).length
-      ? ` Usage: ${JSON.stringify(data.usage)}`
-      : "";
-    setMessage(`全文翻译已输出：${data.file}，共 ${data.chunks} 个片段。${usageText}`, "success");
+    await pollFulltextTask(data.task, paper);
   } catch (error) {
     setMessage(error.message, "error");
   }

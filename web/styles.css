@@ -737,6 +737,66 @@ input[type="range"] {
   gap: 0.35rem;
 }
 
+.fulltext-task {
+  display: grid;
+  gap: 0.38rem;
+  padding: 0.48rem;
+  border: 1px solid #dbeafe;
+  border-radius: 0.45rem;
+  background: #f8fafc;
+}
+
+.fulltext-task-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: var(--ink-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.fulltext-task-header strong {
+  color: var(--blue);
+  font-size: 0.72rem;
+}
+
+.fulltext-progress {
+  overflow: hidden;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.fulltext-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 220ms ease;
+}
+
+.fulltext-task.is-done .fulltext-progress span {
+  background: var(--green);
+}
+
+.fulltext-task.is-failed .fulltext-progress span {
+  background: var(--amber);
+}
+
+.fulltext-task-error,
+.fulltext-task-file {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.fulltext-task-error {
+  color: var(--amber-dark);
+}
+
 .paper-editor {
   display: grid;
   gap: 0.38rem;
