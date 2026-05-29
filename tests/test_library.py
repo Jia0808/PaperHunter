@@ -53,6 +53,117 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual([], visible)
         self.assertEqual(1, hidden_count)
 
+    def test_search_result_inherits_download_and_fulltext_state(self):
+        key = app.paper_key(SAMPLE_PAPER)
+        stored_paper = app.paper_snapshot({
+            **SAMPLE_PAPER,
+            "isDownloaded": True,
+            "fulltextTranslations": [{
+                "type": "fulltext",
+                "language": "zh",
+                "format": "markdown",
+                "file": "translated_papers/sample.bilingual.md",
+                "model": "gpt-test",
+                "createdAt": "2026-05-29T00:00:00+00:00",
+            }],
+        })
+        library = {
+            "papers": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": stored_paper}},
+            "favorites": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": stored_paper}},
+            "ignored": {},
+            "downloads": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "filename": "sample.pdf", "paper": stored_paper}},
+            "history": [],
+        }
+
+        visible, hidden_count = app.apply_library_state([dict(SAMPLE_PAPER)], library)
+
+        self.assertEqual(0, hidden_count)
+        self.assertTrue(visible[0]["isFavorite"])
+        self.assertTrue(visible[0]["isDownloaded"])
+        self.assertEqual("translated_papers/sample.bilingual.md", visible[0]["fulltextTranslations"][0]["file"])
+
+    def test_search_result_inherits_full_abstract_from_library(self):
+        key = app.paper_key(SAMPLE_PAPER)
+        stored_paper = app.paper_snapshot({
+            **SAMPLE_PAPER,
+            "abstract": "Short abstract...",
+            "fullAbstract": "Complete abstract sentence one. Complete abstract sentence two.",
+        })
+        library = {
+            "papers": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": stored_paper}},
+            "favorites": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": stored_paper}},
+            "ignored": {},
+            "downloads": {},
+            "history": [],
+        }
+
+        visible, hidden_count = app.apply_library_state([{**SAMPLE_PAPER, "abstract": "Short abstract..."}], library)
+
+        self.assertEqual(0, hidden_count)
+        self.assertEqual("Complete abstract sentence one. Complete abstract sentence two.", visible[0]["fullAbstract"])
+        self.assertIn("Complete abstract sentence one.", visible[0]["abstract"])
+
+    def test_search_result_keeps_more_complete_abstract_than_library(self):
+        key = app.paper_key(SAMPLE_PAPER)
+        stored_paper = app.paper_snapshot({
+            **SAMPLE_PAPER,
+            "abstract": "Short abstract...",
+            "fullAbstract": "Short abstract th...",
+            "translations": {
+                "zh": {
+                    "text": "短译文 th...",
+                    "language": "zh",
+                    "sourceHash": app.stable_text_hash("Short abstract th..."),
+                }
+            },
+        })
+        library = {
+            "papers": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": stored_paper}},
+            "favorites": {key: {"createdAt": "2026-05-23T00:00:00+00:00", "paper": stored_paper}},
+            "ignored": {},
+            "downloads": {},
+            "history": [],
+        }
+        fresh = {
+            **SAMPLE_PAPER,
+            "abstract": "Short abstract...",
+            "fullAbstract": "Complete abstract sentence one. Complete abstract sentence two.",
+        }
+
+        visible, hidden_count = app.apply_library_state([fresh], library)
+
+        self.assertEqual(0, hidden_count)
+        self.assertEqual("Complete abstract sentence one. Complete abstract sentence two.", visible[0]["fullAbstract"])
+        self.assertTrue(visible[0]["translations"]["zh"]["stale"])
+
+    def test_resolve_translated_file_rejects_path_escape(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            translated_dir = Path(tmpdir) / "translated_papers"
+            translated_dir.mkdir()
+            outside = Path(tmpdir) / "outside.md"
+            outside.write_text("nope", encoding="utf-8")
+            with patch.object(app, "TRANSLATED_DIR", translated_dir):
+                with self.assertRaises(ValueError):
+                    app.resolve_translated_file("../outside.md")
+
+    def test_open_fulltext_folder_selects_translated_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            translated_dir = Path(tmpdir) / "translated_papers"
+            translated_dir.mkdir()
+            output = translated_dir / "sample.bilingual.md"
+            output.write_text("ok", encoding="utf-8")
+            with (
+                patch.object(app, "TRANSLATED_DIR", translated_dir),
+                patch.object(app.sys, "platform", "win32"),
+                patch.object(app.subprocess, "Popen") as popen,
+            ):
+                response = app.open_fulltext_folder({"file": "sample.bilingual.md"})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual("translated_papers/sample.bilingual.md", response["file"])
+        popen.assert_called_once()
+        self.assertEqual("explorer", popen.call_args.args[0][0])
+
     def test_update_library_persists_favorite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             library_path = Path(tmpdir) / "library.json"
@@ -129,9 +240,44 @@ class LibraryTests(unittest.TestCase):
 
         self.assertIn("Short abstract... (可能已截断)", content)
 
+    def test_markdown_export_marks_truncated_full_abstract(self):
+        paper = {
+            **SAMPLE_PAPER,
+            "abstract": "Short abstract...",
+            "fullAbstract": "Full abstract begins but ends with th...",
+        }
+
+        content = app.export_markdown([paper])
+
+        self.assertIn("Full abstract begins but ends with th... (可能已截断)", content)
+
+    def test_bilingual_export_marks_truncated_translation(self):
+        paper = app.paper_snapshot({
+            **SAMPLE_PAPER,
+            "fullAbstract": "Full abstract begins but ends with th...",
+            "translations": {
+                "zh": {
+                    "text": "中文摘要也被截断 th...",
+                    "language": "zh",
+                    "sourceHash": app.stable_text_hash("Full abstract begins but ends with th..."),
+                }
+            },
+        })
+
+        content = app.export_bilingual_markdown([paper])
+
+        self.assertIn("### English Abstract（可能已截断）", content)
+        self.assertIn("### 中文摘要（可能已截断）", content)
+
     def test_refresh_favorites_updates_snapshot(self):
         key = app.paper_key(SAMPLE_PAPER)
-        stale_paper = {**SAMPLE_PAPER, "abstract": "Short abstract...", "fullAbstract": ""}
+        stale_paper = {
+            **SAMPLE_PAPER,
+            "abstract": "Short abstract...",
+            "fullAbstract": "",
+            "note": "Keep my note",
+            "tags": ["agent"],
+        }
         refreshed_paper = {
             **SAMPLE_PAPER,
             "abstract": "Short abstract.",
@@ -155,6 +301,9 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(1, response["refreshed"])
         self.assertIn(key, stored["favorites"])
         self.assertEqual("Full abstract after refresh.", stored["favorites"][key]["paper"]["fullAbstract"])
+        self.assertEqual("Full abstract after refresh.", stored["papers"][key]["paper"]["fullAbstract"])
+        self.assertEqual("Keep my note", stored["favorites"][key]["paper"]["note"])
+        self.assertEqual(["agent"], stored["favorites"][key]["paper"]["tags"])
         self.assertEqual(key, stored["favorites"][key]["paper"]["paperKey"])
 
     def test_model_settings_public_view_masks_api_key(self):
@@ -368,6 +517,36 @@ class LibraryTests(unittest.TestCase):
         self.assertIn("### 中文摘要", content)
         self.assertIn("这是完整的中文摘要。", content)
 
+    def test_extract_chinarxiv_page_abstract(self):
+        html = """
+        <h2>Abstract</h2>
+        <div class="abstract-blockquote">
+          <p>[Objective] Complete detail-page abstract sentence.</p>
+        </div>
+        """
+
+        abstract = app.extract_chinarxiv_page_abstract(html)
+
+        self.assertEqual("[Objective] Complete detail-page abstract sentence.", abstract)
+
+    def test_parse_chinarxiv_feed_hydrates_truncated_abstract(self):
+        feed = """
+        <feed xmlns="http://www.w3.org/2005/Atom">
+          <entry>
+            <title>Hydrated ChinaRxiv Paper</title>
+            <summary>Short abstract th...</summary>
+            <link href="http://chinarxiv.org/items/chinaxiv-202504.00184" rel="alternate" />
+            <updated>2026-05-29T00:00:00Z</updated>
+          </entry>
+        </feed>
+        """
+
+        with patch.object(app, "chinarxiv_page_abstract", return_value="Complete abstract from detail page."):
+            results = app.parse_chinarxiv_feed(feed, 1, "Hydrated")
+
+        self.assertEqual(1, len(results))
+        self.assertEqual("Complete abstract from detail page.", results[0]["fullAbstract"])
+
     def test_batch_translate_only_missing_favorite_translations(self):
         translated_paper = app.paper_snapshot({
             **SAMPLE_PAPER,
@@ -474,6 +653,29 @@ class LibraryTests(unittest.TestCase):
         self.assertTrue(settings["apiKeyRemoved"])
         self.assertIn("downloaded_papers/paper.pdf", names)
         self.assertIn("translated_papers/paper.zh.md", names)
+
+    def test_http_backup_export_stream_has_zip_headers(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            library_path = root / "library.json"
+            settings_path = root / "settings.json"
+            download_dir = root / "downloaded_papers"
+            translated_dir = root / "translated_papers"
+            download_dir.mkdir()
+            translated_dir.mkdir()
+            (download_dir / "paper.pdf").write_bytes(b"%PDF test")
+            with (
+                patch.object(app, "LIBRARY_PATH", library_path),
+                patch.object(app, "SETTINGS_PATH", settings_path),
+                patch.object(app, "DOWNLOAD_DIR", download_dir),
+                patch.object(app, "TRANSLATED_DIR", translated_dir),
+            ):
+                app.save_library(app.empty_library())
+                app.save_settings(app.normalize_settings({"apiKey": "sk-secret", "model": "gpt-test"}))
+                content, filename = app.export_workspace_backup()
+
+        self.assertTrue(filename.endswith(".zip"))
+        self.assertTrue(content.startswith(b"PK\x03\x04"))
 
     def test_backup_import_rejects_path_traversal(self):
         buffer = io.BytesIO()

@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PaperHunter</title>
-    <link rel="stylesheet" href="/styles.css?v=20260527-fulltext-task" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css?v=20260530-bilingual-label" />
   </head>
   <body>
     <div class="app-shell">
@@ -199,7 +200,7 @@
 
           <div id="modelProviders" class="provider-grid" role="list"></div>
 
-          <div class="model-form">
+          <form id="modelSettingsForm" class="model-form" autocomplete="off">
             <label class="field">
               <span>接口协议</span>
               <select id="modelApiTypeSelect">
@@ -233,7 +234,7 @@
               <button id="saveModelButton" class="secondary-action compact-action" type="button">保存设置</button>
             </div>
             <p id="modelTestNote">测试会发送一条极短请求，可能消耗少量 token。PaperHunter 不查询余额。</p>
-          </div>
+          </form>
         </section>
 
         <section class="backup-panel" aria-label="备份与迁移">
@@ -275,7 +276,7 @@
           <div class="export-row">
             <button id="exportFavoritesBibButton" class="secondary-action compact-action" type="button" disabled>导出收藏 BibTeX</button>
             <button id="exportFavoritesMarkdownButton" class="secondary-action compact-action" type="button" disabled>导出阅读清单</button>
-            <button id="exportFavoritesBilingualButton" class="secondary-action compact-action" type="button" disabled>导出中英对照</button>
+            <button id="exportFavoritesBilingualButton" class="secondary-action compact-action" type="button" disabled>批量导出中英对照摘要</button>
             <button id="batchTranslateButton" class="secondary-action compact-action" type="button" disabled>批量翻译摘要</button>
           </div>
           <div class="refresh-row">
@@ -371,6 +372,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=20260527-fulltext-task" defer></script>
+    <script src="/app.js?v=20260530-complete-abstract" defer></script>
   </body>
 </html>

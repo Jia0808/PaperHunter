@@ -17,6 +17,7 @@ const state = {
     ignoredKeys: [],
     downloadKeys: [],
   },
+  expandedLibraryItems: {},
 };
 
 const fieldPresets = {
@@ -353,6 +354,69 @@ function zhTranslation(paper) {
   return translations.zh && typeof translations.zh === "object" ? translations.zh : null;
 }
 
+function looksTruncatedText(value) {
+  return /(?:\.{3,}|…)\s*$/.test(String(value || "").trim());
+}
+
+function preferredAbstractText(current, candidate) {
+  const currentText = String(current || "").trim();
+  const candidateText = String(candidate || "").trim();
+  if (!currentText) {
+    return candidateText;
+  }
+  if (!candidateText) {
+    return currentText;
+  }
+  const currentTruncated = looksTruncatedText(currentText);
+  const candidateTruncated = looksTruncatedText(candidateText);
+  if (currentTruncated && !candidateTruncated) {
+    return candidateText;
+  }
+  if (candidateTruncated && !currentTruncated) {
+    return currentText;
+  }
+  if (candidateText.length > currentText.length + 80) {
+    return candidateText;
+  }
+  return currentText;
+}
+
+function createTranslationBlock(translation, compact = false, sourceComplete = true) {
+  const wrap = document.createElement("div");
+  const translationIncomplete = !sourceComplete || looksTruncatedText(translation.text);
+  wrap.className = [
+    compact ? "library-translation" : "translated-abstract",
+    translation.stale ? "is-stale" : "",
+    translationIncomplete ? "is-incomplete" : "",
+  ].filter(Boolean).join(" ");
+
+  const label = document.createElement("span");
+  label.className = "translation-label";
+  label.textContent = translation.stale
+    ? "中文摘要可能已过期"
+    : translationIncomplete
+      ? "中文摘要可能不完整"
+      : "中文摘要";
+
+  const text = document.createElement("p");
+  text.className = "translation-text";
+  text.textContent = translation.text || "";
+
+  wrap.append(label, text);
+  return wrap;
+}
+
+function abstractDisplayForPaper(paper) {
+  const full = String(paper.fullAbstract || "").trim();
+  if (full) {
+    return { text: full, complete: !looksTruncatedText(full) };
+  }
+  return {
+    text: String(paper.abstract || "").trim() || "No abstract available.",
+    complete: false,
+  };
+}
+
 function endpointForApiType(apiType) {
   return (state.modelApiTypes && state.modelApiTypes[apiType]) || "/v1/chat/completions";
 }
@@ -473,10 +537,50 @@ function isFavorite(paper) {
   return state.library.favoriteKeys.includes(paper.paperKey);
 }
 
+function libraryPaperForKey(key) {
+  if (!key) {
+    return null;
+  }
+  return [...state.library.favorites, ...state.library.ignored]
+    .find((paper) => paper && paper.paperKey === key) || null;
+}
+
+function mergeStoredPaperState(paper, stored) {
+  if (!stored) {
+    return { ...paper };
+  }
+  const merged = { ...paper };
+  const preferredFullAbstract = preferredAbstractText(merged.fullAbstract, stored.fullAbstract);
+  if (preferredFullAbstract) {
+    merged.fullAbstract = preferredFullAbstract;
+  }
+  const hasMergedTranslations = merged.translations
+    && typeof merged.translations === "object"
+    && Object.keys(merged.translations).length > 0;
+  if (!hasMergedTranslations && stored.translations) {
+    merged.translations = stored.translations;
+  }
+  ["fulltextTranslations", "note", "tags", "readingStatus", "fulltextTask"].forEach((field) => {
+    const value = stored[field];
+    if (value !== undefined && value !== null && value !== "") {
+      merged[field] = value;
+    }
+  });
+  if (stored.isDownloaded !== undefined) {
+    merged.isDownloaded = Boolean(stored.isDownloaded);
+  }
+  return merged;
+}
+
 function annotatePaper(paper) {
-  paper.isFavorite = isFavorite(paper);
-  paper.isIgnored = state.library.ignoredKeys.includes(paper.paperKey);
-  return paper;
+  const stored = libraryPaperForKey(paper.paperKey);
+  const annotated = mergeStoredPaperState(paper, stored);
+  annotated.isFavorite = isFavorite(annotated);
+  annotated.isIgnored = state.library.ignoredKeys.includes(annotated.paperKey);
+  if (state.library.downloadKeys.includes(annotated.paperKey)) {
+    annotated.isDownloaded = true;
+  }
+  return annotated;
 }
 
 function syncResultsWithLibrary() {
@@ -491,6 +595,18 @@ function createLibraryAction(label, handler, disabled = false) {
   button.disabled = disabled;
   button.addEventListener("click", handler);
   return button;
+}
+
+function downloadActionLabel(paper) {
+  return !paper.downloadable ? "无 PDF" : paper.isDownloaded ? "已下载" : "下载 PDF";
+}
+
+function favoriteActionLabel(paper) {
+  return paper.isFavorite ? "取消收藏" : "收藏";
+}
+
+function abstractActionLabel(paper) {
+  return zhTranslation(paper) ? "重译摘要" : "翻译摘要";
 }
 
 function fulltextTaskForPaper(paper) {
@@ -525,6 +641,10 @@ function fulltextActionLabel(paper) {
 function fulltextActionDisabled(paper) {
   const task = fulltextTaskForPaper(paper);
   return !paper.isDownloaded || Boolean(task && ["running", "queued"].includes(task.status));
+}
+
+function canOpenFulltextFolder(task) {
+  return Boolean(task && task.status === "done" && task.file);
 }
 
 function createFulltextProgress(paper) {
@@ -572,15 +692,101 @@ function createFulltextProgress(paper) {
     file.textContent = task.file;
     wrap.append(file);
   }
+  if (canOpenFulltextFolder(task)) {
+    const openButton = createLibraryAction("打开所在文件夹", (event) => openFulltextFolder(paper, task, event.currentTarget));
+    openButton.classList.add("fulltext-open-folder");
+    wrap.append(openButton);
+  }
+  return wrap;
+}
+
+function libraryStatusText(paper) {
+  const badges = [];
+  const status = readingStatusLabels[paper.readingStatus || ""];
+  if (status && paper.readingStatus) {
+    badges.push(status);
+  }
+  if (zhTranslation(paper)) {
+    badges.push("摘要已翻译");
+  }
+  const task = fulltextTaskForPaper(paper);
+  if (task) {
+    badges.push(task.status === "done" ? "全文翻译完成" : "全文处理中");
+  }
+  if (paper.isDownloaded) {
+    badges.push("已下载");
+  }
+  return badges.join(" · ");
+}
+
+function createLibraryTagList(paper) {
+  if (!Array.isArray(paper.tags) || !paper.tags.length) {
+    return null;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "library-tag-list";
+  paper.tags
+    .map((tag) => String(tag || "").trim())
+    .filter(Boolean)
+    .forEach((tag) => {
+      const chip = document.createElement("span");
+      chip.className = "library-tag";
+      chip.textContent = tag;
+      wrap.append(chip);
+    });
+  return wrap;
+}
+
+function createLibraryNote(paper) {
+  const text = String(paper.note || "").trim();
+  if (!text) {
+    return null;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "library-note-block";
+
+  const label = document.createElement("span");
+  label.className = "library-note-label";
+  label.textContent = "备注";
+
+  const note = document.createElement("p");
+  note.className = "library-note";
+  note.textContent = text;
+
+  wrap.append(label, note);
+  return wrap;
+}
+
+function createLibraryMoreActions(actions) {
+  const wrap = document.createElement("details");
+  wrap.className = "library-more-actions";
+
+  const summary = document.createElement("summary");
+  summary.className = "library-more-toggle";
+  summary.textContent = "更多操作";
+
+  const panel = document.createElement("div");
+  panel.className = "library-more-panel";
+  actions.forEach((action) => panel.append(action));
+
+  wrap.append(summary, panel);
   return wrap;
 }
 
 function createLibraryItem(paper, view) {
-  const item = document.createElement("article");
+  const key = paper.paperKey || `${paper.source || "paper"}-${paper.paperId || paper.title || "untitled"}`;
+  const item = document.createElement("details");
   item.className = "library-item";
+  item.open = Boolean(state.expandedLibraryItems[key]);
+  item.addEventListener("toggle", () => {
+    state.expandedLibraryItems[key] = item.open;
+  });
 
-  const header = document.createElement("div");
+  const header = document.createElement("summary");
   header.className = "library-item-header";
+
+  const headerText = document.createElement("span");
+  headerText.className = "library-item-title-block";
 
   const title = document.createElement("strong");
   title.textContent = paper.title || "Untitled";
@@ -588,7 +794,16 @@ function createLibraryItem(paper, view) {
 
   const meta = document.createElement("span");
   meta.textContent = paperDisplayMeta(paper);
-  header.append(title, meta);
+
+  headerText.append(title, meta);
+
+  const status = document.createElement("small");
+  status.className = "library-item-status";
+  status.textContent = libraryStatusText(paper) || (view === "ignored" ? "已忽略" : "展开");
+  header.append(headerText, status);
+
+  const body = document.createElement("div");
+  body.className = "library-item-body";
 
   const actions = document.createElement("div");
   actions.className = "library-item-actions";
@@ -602,38 +817,58 @@ function createLibraryItem(paper, view) {
   openLink.title = "打开来源页面";
 
   actions.append(openLink);
+  let moreActions = null;
 
   if (view === "favorites") {
     const translation = zhTranslation(paper);
-    const editor = createPaperEditor(paper);
-    item.append(editor);
+    const abstractDisplay = abstractDisplayForPaper(paper);
+    const tags = createLibraryTagList(paper);
+    const note = createLibraryNote(paper);
+    if (tags) {
+      body.append(tags);
+    }
+    if (note) {
+      body.append(note);
+    }
     if (translation) {
-      const translated = document.createElement("p");
-      translated.className = `library-translation${translation.stale ? " is-stale" : ""}`;
-      translated.textContent = translation.stale ? `译文可能已过期：${translation.text}` : translation.text;
-      item.append(translated);
+      body.append(createTranslationBlock(translation, true, abstractDisplay.complete));
     }
     const fulltextProgress = createFulltextProgress(paper);
     if (fulltextProgress) {
-      item.append(fulltextProgress);
+      body.append(fulltextProgress);
     }
+    body.append(createPaperEditor(paper));
     actions.append(
-      createLibraryAction("下载", () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
-      createLibraryAction(translation ? "重译摘要" : "翻译摘要", () => translateLibraryPaper(paper)),
+      createLibraryAction(downloadActionLabel(paper), () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
+      createLibraryAction(abstractActionLabel(paper), () => translateLibraryPaper(paper)),
       createLibraryAction(fulltextActionLabel(paper), () => translateFulltextPaper(paper), fulltextActionDisabled(paper)),
-      createLibraryAction("BibTeX", () => copyLibraryPaperExport(paper, "bibtex")),
-      createLibraryAction("Markdown", () => copyLibraryPaperExport(paper, "markdown")),
-      createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
     );
+    moreActions = createLibraryMoreActions([
+      createLibraryAction("导出 BibTeX", (event) => exportLibraryPaperFile(paper, "bibtex", event.currentTarget)),
+      createLibraryAction("导出原文摘要", (event) => exportLibraryPaperFile(paper, "markdown", event.currentTarget)),
+      createLibraryAction("导出带译文摘要", (event) => exportLibraryPaperFile(paper, "bilingual_markdown", event.currentTarget), !zhTranslation(paper)),
+      createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
+    ]);
   } else {
     actions.append(createLibraryAction("恢复", () => updateLibraryPaperFromPanel("unignore", paper)));
   }
 
-  item.append(header, actions);
+  body.append(actions);
+  if (moreActions) {
+    body.append(moreActions);
+  }
+  item.append(header, body);
   return item;
 }
 
 function createPaperEditor(paper) {
+  const editorWrap = document.createElement("details");
+  editorWrap.className = "paper-editor-wrap";
+
+  const summary = document.createElement("summary");
+  summary.className = "paper-editor-toggle";
+  summary.textContent = "管理信息";
+
   const editor = document.createElement("div");
   editor.className = "paper-editor";
 
@@ -670,7 +905,8 @@ function createPaperEditor(paper) {
   }, save));
 
   editor.append(status, tags, note, save);
-  return editor;
+  editorWrap.append(summary, editor);
+  return editorWrap;
 }
 
 function renderLibraryItems() {
@@ -706,7 +942,7 @@ function renderLibrary() {
   elements.batchTranslate.disabled = favoriteCount === 0;
   elements.refreshFavorites.disabled = favoriteCount === 0;
   elements.clearHistory.disabled = state.library.history.length === 0;
-  const staleCount = state.library.favorites.filter((paper) => !paper.fullAbstract).length;
+  const staleCount = state.library.favorites.filter((paper) => !abstractDisplayForPaper(paper).complete).length;
   elements.libraryRefreshNote.textContent = staleCount
     ? `${staleCount} 篇收藏可能只有截断摘要，可刷新补全可获取的元数据。`
     : "收藏元数据已包含完整摘要或来源未提供更多内容。";
@@ -753,16 +989,24 @@ function updateLibrary(library) {
   renderLibrary();
 }
 
+function sentenceJoin(parts) {
+  return parts
+    .map((part) => String(part || "").trim().replace(/[。.!?]+$/u, ""))
+    .filter(Boolean)
+    .join("。");
+}
+
 function downloadTextFile(filename, content, mimeType) {
   const blob = new Blob([content], { type: mimeType || "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
+  link.rel = "noopener";
   document.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function downloadBinaryFile(filename, base64Content, mimeType) {
@@ -772,10 +1016,11 @@ function downloadBinaryFile(filename, base64Content, mimeType) {
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
+  link.rel = "noopener";
   document.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 function fileToBase64(file) {
@@ -828,18 +1073,24 @@ function createPaperCard(paper, index) {
   authors.className = "authors";
   authors.textContent = paper.authors || "Unknown authors";
 
+  const abstractDisplay = abstractDisplayForPaper(paper);
+  const abstractWrap = document.createElement("div");
+  abstractWrap.className = `abstract-block${abstractDisplay.complete ? "" : " is-fallback"}`;
+
+  const abstractLabel = document.createElement("span");
+  abstractLabel.className = "abstract-label";
+  abstractLabel.textContent = abstractDisplay.complete ? "原文摘要" : "来源摘要可能不完整";
+
   const abstract = document.createElement("p");
   abstract.className = "abstract";
-  abstract.textContent = paper.abstract || "No abstract available.";
+  abstract.textContent = abstractDisplay.text;
+  abstractWrap.append(abstractLabel, abstract);
 
-  content.append(meta, title, authors, abstract);
+  content.append(meta, title, authors, abstractWrap);
 
   const translation = zhTranslation(paper);
   if (translation) {
-    const translated = document.createElement("p");
-    translated.className = `translated-abstract${translation.stale ? " is-stale" : ""}`;
-    translated.textContent = translation.stale ? `中文摘要可能已过期：${translation.text}` : `中文摘要：${translation.text}`;
-    content.append(translated);
+    content.append(createTranslationBlock(translation, false, abstractDisplay.complete));
   }
 
   const actions = document.createElement("div");
@@ -849,7 +1100,7 @@ function createPaperCard(paper, index) {
   downloadButton.className = "paper-action";
   downloadButton.type = "button";
   downloadButton.dataset.index = String(index);
-  downloadButton.textContent = !paper.downloadable ? "无 PDF" : paper.isDownloaded ? "已保存" : "下载 PDF";
+  downloadButton.textContent = downloadActionLabel(paper);
   downloadButton.disabled = Boolean(paper.isDownloaded) || !paper.downloadable;
   downloadButton.addEventListener("click", () => downloadPaper(index, downloadButton));
 
@@ -865,7 +1116,7 @@ function createPaperCard(paper, index) {
   const favoriteButton = document.createElement("button");
   favoriteButton.className = "paper-action";
   favoriteButton.type = "button";
-  favoriteButton.textContent = paper.isFavorite ? "取消收藏" : "收藏";
+  favoriteButton.textContent = favoriteActionLabel(paper);
   favoriteButton.addEventListener("click", () => toggleFavorite(index, favoriteButton));
 
   const ignoreButton = document.createElement("button");
@@ -877,24 +1128,39 @@ function createPaperCard(paper, index) {
   const copyBibButton = document.createElement("button");
   copyBibButton.className = "paper-action";
   copyBibButton.type = "button";
-  copyBibButton.textContent = "复制 BibTeX";
-  copyBibButton.addEventListener("click", () => copyPaperExport(index, "bibtex"));
+  copyBibButton.textContent = "导出 BibTeX";
+  copyBibButton.addEventListener("click", () => exportPaperFile(index, "bibtex", copyBibButton));
 
-  const copyMarkdownButton = document.createElement("button");
-  copyMarkdownButton.className = "paper-action";
-  copyMarkdownButton.type = "button";
-  copyMarkdownButton.textContent = "复制 Markdown";
-  copyMarkdownButton.addEventListener("click", () => copyPaperExport(index, "markdown"));
+  const copyOriginalMarkdownButton = document.createElement("button");
+  copyOriginalMarkdownButton.className = "paper-action";
+  copyOriginalMarkdownButton.type = "button";
+  copyOriginalMarkdownButton.textContent = "导出原文摘要";
+  copyOriginalMarkdownButton.addEventListener("click", () => exportPaperFile(index, "markdown", copyOriginalMarkdownButton));
+
+  const copyBilingualMarkdownButton = document.createElement("button");
+  copyBilingualMarkdownButton.className = "paper-action";
+  copyBilingualMarkdownButton.type = "button";
+  copyBilingualMarkdownButton.textContent = "导出带译文摘要";
+  copyBilingualMarkdownButton.disabled = !translation;
+  copyBilingualMarkdownButton.title = translation ? "导出包含中英文摘要的 Markdown" : "先翻译摘要后可导出带译文摘要";
+  copyBilingualMarkdownButton.addEventListener("click", () => exportPaperFile(index, "bilingual_markdown", copyBilingualMarkdownButton));
 
   const translateButton = document.createElement("button");
   translateButton.className = "paper-action";
   translateButton.type = "button";
-  translateButton.textContent = translation ? "重译摘要" : "翻译摘要";
+  translateButton.textContent = abstractActionLabel(paper);
   translateButton.addEventListener("click", () => translateResultPaper(index, translateButton));
 
   const secondaryActions = document.createElement("div");
   secondaryActions.className = "paper-secondary-actions";
-  secondaryActions.append(favoriteButton, translateButton, ignoreButton, copyBibButton, copyMarkdownButton);
+  secondaryActions.append(
+    favoriteButton,
+    translateButton,
+    ignoreButton,
+    copyBibButton,
+    copyOriginalMarkdownButton,
+    copyBilingualMarkdownButton,
+  );
 
   actions.append(downloadButton, link, secondaryActions);
   card.append(content, actions);
@@ -924,6 +1190,28 @@ function renderResults() {
   });
 }
 
+function timeoutMessageForRequest(url) {
+  if (url.includes("/api/search")) {
+    return "检索超时。可以减少数据源，或先只选 arXiv / CVF 试一次。";
+  }
+  if (url.includes("/api/settings/test")) {
+    return "模型连接测试超时。请检查 Base URL、Endpoint、模型名称，或稍后再试。";
+  }
+  if (url.includes("/api/translate/fulltext")) {
+    return "全文翻译请求超时。任务可能仍在后台处理，请稍后查看状态。";
+  }
+  if (url.includes("/api/translate")) {
+    return "摘要翻译超时。可以稍后重试，或换用响应更快的模型。";
+  }
+  if (url.includes("/api/download")) {
+    return "PDF 下载超时。可以稍后重试，或打开来源页面手动下载。";
+  }
+  if (url.includes("/api/backup")) {
+    return "备份操作超时。请确认文件大小和本地服务状态后重试。";
+  }
+  return "请求超时，请稍后重试。";
+}
+
 async function requestJson(url, payload, timeoutMs = 22000) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -941,7 +1229,7 @@ async function requestJson(url, payload, timeoutMs = 22000) {
     return data;
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("检索超时。可以减少数据源，或先只选 arXiv / CVF 试一次。");
+      throw new Error(timeoutMessageForRequest(url));
     }
     throw error;
   } finally {
@@ -1045,13 +1333,87 @@ async function downloadLibraryPaper(paper) {
   }
 }
 
-async function copyLibraryPaperExport(paper, format) {
+function exportFormatLabel(format) {
+  if (format === "bibtex") {
+    return "BibTeX";
+  }
+  if (format === "bilingual_markdown") {
+    return "带译文摘要 Markdown";
+  }
+  return "原文摘要 Markdown";
+}
+
+function safeFilenamePart(text) {
+  return String(text || "paper")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90) || "paper";
+}
+
+function singlePaperExportFilename(paper, format) {
+  const base = safeFilenamePart(paper.title || paper.paperId || paper.paperKey || "paper");
+  if (format === "bibtex") {
+    return `${base}.bib`;
+  }
+  if (format === "bilingual_markdown") {
+    return `${base}.bilingual.md`;
+  }
+  return `${base}.abstract.md`;
+}
+
+async function exportLibraryPaperFile(paper, format, button = null) {
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导出中";
+  }
   try {
     const data = await exportPapers({ scope: "results", format, papers: [paper], download: false });
-    await copyText(data.content);
-    setMessage(format === "bibtex" ? "收藏 BibTeX 已复制。" : "收藏 Markdown 已复制。", "success");
+    downloadTextFile(singlePaperExportFilename(paper, format), data.content, data.mimeType);
+    setMessage(`收藏 ${exportFormatLabel(format)} 已导出。`, "success");
+    if (button) {
+      button.textContent = "已导出";
+      window.setTimeout(() => {
+        button.textContent = originalText;
+      }, 900);
+    }
   } catch (error) {
     setMessage(error.message, "error");
+    if (button) {
+      button.textContent = originalText;
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function openFulltextFolder(paper, task, button) {
+  if (!task || !task.file) {
+    return;
+  }
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "打开中";
+  }
+  try {
+    const data = await requestJson("/api/open/fulltext-folder", {
+      paperKey: paper.paperKey,
+      taskId: task.taskId,
+      file: task.file,
+    });
+    setMessage(`已打开译文所在位置：${data.file || task.file}`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
   }
 }
 
@@ -1072,7 +1434,7 @@ async function translatePaper(paper, button) {
     }
     paper.translations.zh = data.translation;
     updateLibrary(data.library || state.library);
-    setMessage("中文摘要已保存到本地收件箱。", "success");
+    setMessage("中文摘要已保存到本地论文记录。加入收藏后可在收件箱集中管理。", "success");
     renderResults();
   } catch (error) {
     setMessage(error.message, "error");
@@ -1310,9 +1672,8 @@ async function exportWorkspaceBackup() {
   elements.exportBackup.disabled = true;
   elements.exportBackup.textContent = "导出中";
   try {
-    const data = await requestJson("/api/backup/export", {}, 60000);
-    downloadBinaryFile(data.filename, data.contentBase64, data.mimeType);
-    setMessage(`已导出全量备份：${data.filename}`, "success");
+    window.open("/api/backup/export", "_blank", "noopener");
+    setMessage("已开始导出全量备份。大文件可能需要等待几秒。", "success");
   } catch (error) {
     setMessage(error.message, "error");
   } finally {
@@ -1341,17 +1702,35 @@ async function importWorkspaceBackup(event) {
   }
 }
 
-async function copyPaperExport(index, format) {
+async function exportPaperFile(index, format, button = null) {
   const paper = state.results[index];
-  if (!paper) {
+  if (!paper || (button && button.disabled)) {
     return;
+  }
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导出中";
   }
   try {
     const data = await exportPapers({ scope: "results", format, papers: [paper], download: false });
-    await copyText(data.content);
-    setMessage(format === "bibtex" ? "BibTeX 已复制。" : "Markdown 已复制。", "success");
+    downloadTextFile(singlePaperExportFilename(paper, format), data.content, data.mimeType);
+    setMessage(`${exportFormatLabel(format)} 已导出。`, "success");
+    if (button) {
+      button.textContent = "已导出";
+      window.setTimeout(() => {
+        button.textContent = originalText;
+      }, 900);
+    }
   } catch (error) {
     setMessage(error.message, "error");
+    if (button) {
+      button.textContent = originalText;
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
   }
 }
 
@@ -1412,10 +1791,17 @@ async function performSearch(event) {
       : "";
     const sourceBreakdown = formatSourceCounts(data.sourceCounts);
     const issueText = summarizeErrors(data.errors);
-    const hiddenText = data.hiddenIgnoredCount ? `已隐藏 ${data.hiddenIgnoredCount} 篇忽略论文。` : "";
-    const suffix = errorCount ? `，有 ${errorCount} 个来源暂时失败。${issueText}` : "。";
-    const breakdownText = sourceBreakdown ? `来源分布：${sourceBreakdown}。` : "";
-    setMessage(`找到 ${state.results.length} 篇论文${countText}。${breakdownText}${hiddenText}${suffix}`, state.results.length ? "success" : "");
+    const messageParts = [`找到 ${state.results.length} 篇论文${countText}`];
+    if (sourceBreakdown) {
+      messageParts.push(`来源分布：${sourceBreakdown}`);
+    }
+    if (data.hiddenIgnoredCount) {
+      messageParts.push(`已隐藏 ${data.hiddenIgnoredCount} 篇忽略论文`);
+    }
+    if (errorCount) {
+      messageParts.push(`有 ${errorCount} 个来源暂时失败${issueText ? `：${issueText}` : ""}`);
+    }
+    setMessage(`${sentenceJoin(messageParts)}。`, state.results.length ? "success" : "");
     setProgress(100);
     window.setTimeout(() => setProgress(0), 650);
   } catch (error) {

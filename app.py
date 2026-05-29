@@ -4,6 +4,7 @@ import io
 import json
 import mimetypes
 import re
+import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
@@ -266,6 +267,32 @@ def clean_html(value: str) -> str:
     return re.sub(r"\s+", " ", unescape(text)).strip()
 
 
+def looks_truncated_text(value: str) -> bool:
+    text = clean_html(str(value or "")).strip()
+    if not text:
+        return False
+    return bool(re.search(r"(?:\.{3,}|…)\s*$", text))
+
+
+def preferred_abstract_text(current: str, candidate: str) -> str:
+    current_text = clean_html(str(current or ""))
+    candidate_text = clean_html(str(candidate or ""))
+    if not current_text:
+        return candidate_text
+    if not candidate_text:
+        return current_text
+
+    current_truncated = looks_truncated_text(current_text)
+    candidate_truncated = looks_truncated_text(candidate_text)
+    if current_truncated and not candidate_truncated:
+        return candidate_text
+    if candidate_truncated and not current_truncated:
+        return current_text
+    if len(candidate_text) > len(current_text) + 80:
+        return candidate_text
+    return current_text
+
+
 def clean_display_text(value: str, limit: int) -> str:
     return compact_text(clean_html(str(value or "")), limit)
 
@@ -329,11 +356,13 @@ def paper_key(paper: dict) -> str:
 
 def paper_snapshot(paper: dict) -> dict:
     snapshot = {field: paper.get(field, "") for field in PAPER_SNAPSHOT_FIELDS}
+    full_abstract = clean_html(str(snapshot.get("fullAbstract") or ""))
+    abstract_source = full_abstract or str(snapshot.get("abstract") or "暂无摘要。")
     snapshot["paperKey"] = paper_key(paper)
     snapshot["title"] = clean_display_text(str(snapshot.get("title") or "Untitled"), TITLE_TEXT_LIMIT)
     snapshot["authors"] = clean_display_text(str(snapshot.get("authors") or "Unknown authors"), AUTHOR_TEXT_LIMIT)
-    snapshot["abstract"] = clean_display_text(str(snapshot.get("abstract") or "暂无摘要。"), ABSTRACT_TEXT_LIMIT)
-    snapshot["fullAbstract"] = clean_html(str(snapshot.get("fullAbstract") or ""))
+    snapshot["abstract"] = clean_display_text(abstract_source, ABSTRACT_TEXT_LIMIT)
+    snapshot["fullAbstract"] = full_abstract
     snapshot["downloadable"] = bool(snapshot.get("pdfUrl"))
     snapshot["isDownloaded"] = bool(snapshot.get("isDownloaded"))
     if snapshot.get("readingStatus") not in {"", "unread", "reading", "read", "to_translate"}:
@@ -1568,6 +1597,41 @@ def fulltext_task_status(payload: dict) -> dict:
     }
 
 
+def resolve_translated_file(file_value: str) -> Path:
+    value = str(file_value or "").strip().replace("\\", "/")
+    if not value:
+        raise ValueError("缺少全文译文文件路径。")
+    if value.startswith("translated_papers/"):
+        path = ROOT_DIR / value
+    else:
+        path = TRANSLATED_DIR / value
+    resolved = path.resolve()
+    translated_root = TRANSLATED_DIR.resolve()
+    if translated_root not in [resolved, *resolved.parents]:
+        raise ValueError("全文译文文件路径不在 translated_papers 目录内。")
+    if not resolved.exists() or not resolved.is_file():
+        raise ValueError("全文译文文件不存在。")
+    return resolved
+
+
+def open_fulltext_folder(payload: dict) -> dict:
+    task_id = str(payload.get("taskId") or "")
+    task = load_fulltext_task(task_id) if task_id else None
+    file_value = str(payload.get("file") or "")
+    if not file_value and task:
+        file_value = str(task.get("file") or "")
+    path = resolve_translated_file(file_value)
+
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["explorer", f"/select,{path}"])
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", "-R", str(path)])
+    else:
+        opener = "xdg-open"
+        subprocess.Popen([opener, str(path.parent)])
+    return {"ok": True, "file": translated_relative_path(path)}
+
+
 def compact_library(library: dict) -> dict:
     favorites = []
     for key, item in (library.get("favorites") or {}).items():
@@ -1621,19 +1685,32 @@ def apply_library_state(results: list[dict], library: dict) -> tuple[list[dict],
         if isinstance(stored, dict) and isinstance(stored.get("paper"), dict):
             stored_paper = stored["paper"]
             translations = stored_paper.get("translations")
+            fulltext_translations = stored_paper.get("fulltextTranslations")
+            full_abstract = stored_paper.get("fullAbstract")
             note = stored_paper.get("note")
             tags = stored_paper.get("tags")
             reading_status = stored_paper.get("readingStatus")
+            is_downloaded = stored_paper.get("isDownloaded")
+            if full_abstract:
+                preferred_full_abstract = preferred_abstract_text(paper.get("fullAbstract"), full_abstract)
+                paper["fullAbstract"] = preferred_full_abstract
+                paper["abstract"] = compact_text(preferred_full_abstract, ABSTRACT_TEXT_LIMIT)
             if translations:
-                paper["translations"] = translations
+                paper["translations"] = normalize_translations(translations, paper)
+            if fulltext_translations:
+                paper["fulltextTranslations"] = fulltext_translations
             if note:
                 paper["note"] = note
             if tags:
                 paper["tags"] = tags
             if reading_status:
                 paper["readingStatus"] = reading_status
+            if is_downloaded is not None:
+                paper["isDownloaded"] = bool(is_downloaded)
         paper["paperKey"] = key
         paper["isFavorite"] = key in favorites
+        if key in library.get("downloads", {}):
+            paper["isDownloaded"] = True
         paper["isIgnored"] = False
         annotated.append(paper)
     return annotated, hidden_ignored
@@ -1745,7 +1822,15 @@ def refresh_favorite_entry(key: str, item: dict) -> tuple[str, dict | None, str]
     if not refreshed:
         return key, None, "未找到匹配结果"
 
-    snapshot = paper_snapshot({**refreshed, "isDownloaded": bool(paper.get("isDownloaded")) or bool(refreshed.get("isDownloaded"))})
+    snapshot = paper_snapshot({
+        **refreshed,
+        "readingStatus": paper.get("readingStatus"),
+        "note": paper.get("note"),
+        "tags": paper.get("tags"),
+        "translations": paper.get("translations"),
+        "fulltextTranslations": paper.get("fulltextTranslations"),
+        "isDownloaded": bool(paper.get("isDownloaded")) or bool(refreshed.get("isDownloaded")),
+    })
     snapshot["paperKey"] = key
     return key, snapshot, ""
 
@@ -1791,8 +1876,15 @@ def refresh_favorites_metadata() -> dict:
             item = library.get("favorites", {}).get(key)
             if not isinstance(item, dict):
                 continue
+            now = now_iso()
             item["paper"] = snapshot
-            item["refreshedAt"] = now_iso()
+            item["refreshedAt"] = now
+            library["papers"][key] = {
+                "createdAt": (library.get("papers", {}).get(key) or item).get("createdAt", now),
+                "updatedAt": now,
+                "refreshedAt": now,
+                "paper": snapshot,
+            }
         save_library(library)
         library_view = compact_library(library)
 
@@ -2001,7 +2093,7 @@ def export_markdown(papers: list[dict]) -> str:
         full_abstract = clean_html(str(paper.get("fullAbstract") or ""))
         abstract = full_abstract or clean_html(str(paper.get("abstract") or ""))
         if abstract:
-            suffix = "" if full_abstract else " (可能已截断)"
+            suffix = " (可能已截断)" if looks_truncated_text(abstract) or not full_abstract else ""
             lines.append(f"   - 摘要: {abstract}{suffix}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
@@ -2034,17 +2126,24 @@ def export_bilingual_markdown(papers: list[dict]) -> str:
 
         english = clean_html(str(paper.get("fullAbstract") or paper.get("abstract") or ""))
         if english:
-            lines.append("### English Abstract")
+            english_warning = "（可能已截断）" if looks_truncated_text(english) else ""
+            lines.append(f"### English Abstract{english_warning}")
             lines.append("")
             lines.append(english)
             lines.append("")
 
         translation = normalize_translations(paper.get("translations"), paper).get("zh")
         if translation:
-            stale = "（可能已过期）" if translation.get("stale") else ""
-            lines.append(f"### 中文摘要{stale}")
+            translation_text = str(translation.get("text") or "")
+            notices = []
+            if translation.get("stale"):
+                notices.append("可能已过期")
+            if looks_truncated_text(english) or looks_truncated_text(translation_text):
+                notices.append("可能已截断")
+            notice = f"（{'，'.join(notices)}）" if notices else ""
+            lines.append(f"### 中文摘要{notice}")
             lines.append("")
-            lines.append(str(translation.get("text") or ""))
+            lines.append(translation_text)
             lines.append("")
         else:
             lines.append("### 中文摘要")
@@ -2498,6 +2597,32 @@ def chinarxiv_page_pdf_url(page_url: str) -> str:
     return ""
 
 
+def extract_chinarxiv_page_abstract(html: str) -> str:
+    patterns = [
+        r'<div[^>]+class=["\'][^"\']*\babstract-blockquote\b[^"\']*["\'][^>]*>\s*<p[^>]*>(.*?)</p>',
+        r"<h2[^>]*>\s*Abstract\s*</h2>\s*<div[^>]*>(.*?)</div>",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        abstract = clean_html(match.group(1))
+        if abstract:
+            return abstract
+    return ""
+
+
+def chinarxiv_page_abstract(page_url: str) -> str:
+    if not page_url or normalized_host(page_url) not in {"chinarxiv.org", "chinaxiv.org"}:
+        return ""
+    try:
+        response = requests.get(page_url, headers=REQUEST_HEADERS, timeout=request_timeout(4))
+        response.raise_for_status()
+    except requests.RequestException:
+        return ""
+    return extract_chinarxiv_page_abstract(response.text)
+
+
 def parse_chinarxiv_feed(text: str, max_results: int, query: str) -> list[dict]:
     try:
         root = ET.fromstring(text)
@@ -2520,6 +2645,8 @@ def parse_chinarxiv_feed(text: str, max_results: int, query: str) -> list[dict]:
             continue
         page_url, pdf_url = extract_feed_links(entry)
         page_url = page_url or direct_child_text(entry, {"link"})
+        if page_url and (not abstract or looks_truncated_text(abstract)):
+            abstract = preferred_abstract_text(abstract, chinarxiv_page_abstract(page_url))
         pdf_url = pdf_url or chinarxiv_pdf_from_page(page_url)
         if pdf_url and not is_trusted_open_pdf_url(pdf_url):
             pdf_url = ""
@@ -3254,17 +3381,6 @@ def extract_backup_zip(zip_bytes: bytes, strategy: str = "merge") -> dict:
     return imported
 
 
-def export_backup_payload() -> dict:
-    content, filename = export_workspace_backup()
-    return {
-        "ok": True,
-        "filename": filename,
-        "mimeType": "application/zip",
-        "contentBase64": base64.b64encode(content).decode("ascii"),
-        "size": len(content),
-    }
-
-
 def import_backup_payload(payload: dict) -> dict:
     encoded = str(payload.get("contentBase64") or "")
     if not encoded:
@@ -3316,6 +3432,11 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
             )
             return
 
+        if self.path.startswith("/api/backup/export"):
+            content, filename = export_workspace_backup()
+            self.send_bytes(content, "application/zip", filename)
+            return
+
         if self.path.startswith("/api/settings"):
             self.send_json(model_settings_status())
             return
@@ -3358,8 +3479,8 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
             if self.path.startswith("/api/translate/fulltext"):
                 self.send_json(translate_fulltext(payload))
                 return
-            if self.path.startswith("/api/backup/export"):
-                self.send_json(export_backup_payload())
+            if self.path.startswith("/api/open/fulltext-folder"):
+                self.send_json(open_fulltext_folder(payload))
                 return
             if self.path.startswith("/api/backup/import"):
                 self.send_json(import_backup_payload(payload))
@@ -3390,6 +3511,15 @@ class PaperHunterHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_bytes(self, body: bytes, content_type: str, filename: str = "", status: int = 200) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 
