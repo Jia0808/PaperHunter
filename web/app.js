@@ -2,6 +2,13 @@ const state = {
   results: [],
   sortBy: "recent",
   isSearching: false,
+  libraryView: "favorites",
+  modelProviders: [],
+  modelApiTypes: {},
+  modelSettings: null,
+  selectedProvider: "apixin_gpt",
+  fulltextTasks: {},
+  fulltextPollers: {},
   library: {
     favorites: [],
     ignored: [],
@@ -10,6 +17,7 @@ const state = {
     ignoredKeys: [],
     downloadKeys: [],
   },
+  expandedLibraryItems: {},
 };
 
 const fieldPresets = {
@@ -97,6 +105,14 @@ const externalGateways = [
   },
 ];
 
+const readingStatusLabels = {
+  "": "未设置",
+  unread: "待读",
+  reading: "精读",
+  read: "已读",
+  to_translate: "待翻译",
+};
+
 const elements = {
   form: document.querySelector("#searchForm"),
   query: document.querySelector("#queryInput"),
@@ -130,9 +146,27 @@ const elements = {
   ignoredCount: document.querySelector("#ignoredCount"),
   exportFavoritesBib: document.querySelector("#exportFavoritesBibButton"),
   exportFavoritesMarkdown: document.querySelector("#exportFavoritesMarkdownButton"),
+  exportFavoritesBilingual: document.querySelector("#exportFavoritesBilingualButton"),
+  batchTranslate: document.querySelector("#batchTranslateButton"),
   refreshFavorites: document.querySelector("#refreshFavoritesButton"),
   libraryRefreshNote: document.querySelector("#libraryRefreshNote"),
   clearHistory: document.querySelector("#clearHistoryButton"),
+  modelStatusBadge: document.querySelector("#modelStatusBadge"),
+  modelProviders: document.querySelector("#modelProviders"),
+  modelApiType: document.querySelector("#modelApiTypeSelect"),
+  modelBaseUrl: document.querySelector("#modelBaseUrlInput"),
+  modelEndpoint: document.querySelector("#modelEndpointInput"),
+  modelName: document.querySelector("#modelNameInput"),
+  modelApiKey: document.querySelector("#modelApiKeyInput"),
+  modelKeyHint: document.querySelector("#modelKeyHint"),
+  modelFinalUrl: document.querySelector("#modelFinalUrl"),
+  testModel: document.querySelector("#testModelButton"),
+  saveModel: document.querySelector("#saveModelButton"),
+  modelTestNote: document.querySelector("#modelTestNote"),
+  exportBackup: document.querySelector("#exportBackupButton"),
+  importBackup: document.querySelector("#importBackupInput"),
+  libraryTabs: document.querySelectorAll("[data-library-view]"),
+  libraryItems: document.querySelector("#libraryItems"),
   searchHistory: document.querySelector("#searchHistory"),
   progress: document.querySelector("#progressBar"),
 };
@@ -301,10 +335,197 @@ function formatSourceCounts(counts = {}) {
     .join("，");
 }
 
-function normalizeLibrary(library = {}) {
+function paperUrl(paper) {
+  return paper.pageUrl || paper.entryUrl || paper.pdfUrl || "#";
+}
+
+function paperDisplayMeta(paper) {
+  return [
+    paper.sourceLabel || sourceLabels[paper.source] || "Source",
+    paper.year || paper.published || "",
+    paper.venue || paper.category || "",
+  ].filter(Boolean).join(" · ");
+}
+
+function zhTranslation(paper) {
+  const translations = paper && paper.translations && typeof paper.translations === "object"
+    ? paper.translations
+    : {};
+  return translations.zh && typeof translations.zh === "object" ? translations.zh : null;
+}
+
+function looksTruncatedText(value) {
+  return /(?:\.{3,}|…)\s*$/.test(String(value || "").trim());
+}
+
+function preferredAbstractText(current, candidate) {
+  const currentText = String(current || "").trim();
+  const candidateText = String(candidate || "").trim();
+  if (!currentText) {
+    return candidateText;
+  }
+  if (!candidateText) {
+    return currentText;
+  }
+  const currentTruncated = looksTruncatedText(currentText);
+  const candidateTruncated = looksTruncatedText(candidateText);
+  if (currentTruncated && !candidateTruncated) {
+    return candidateText;
+  }
+  if (candidateTruncated && !currentTruncated) {
+    return currentText;
+  }
+  if (candidateText.length > currentText.length + 80) {
+    return candidateText;
+  }
+  return currentText;
+}
+
+function createTranslationBlock(translation, compact = false, sourceComplete = true) {
+  const wrap = document.createElement("div");
+  const translationIncomplete = !sourceComplete || looksTruncatedText(translation.text);
+  wrap.className = [
+    compact ? "library-translation" : "translated-abstract",
+    translation.stale ? "is-stale" : "",
+    translationIncomplete ? "is-incomplete" : "",
+  ].filter(Boolean).join(" ");
+
+  const label = document.createElement("span");
+  label.className = "translation-label";
+  label.textContent = translation.stale
+    ? "中文摘要可能已过期"
+    : translationIncomplete
+      ? "中文摘要可能不完整"
+      : "中文摘要";
+
+  const text = document.createElement("p");
+  text.className = "translation-text";
+  text.textContent = translation.text || "";
+
+  wrap.append(label, text);
+  return wrap;
+}
+
+function abstractDisplayForPaper(paper) {
+  const full = String(paper.fullAbstract || "").trim();
+  if (full) {
+    return { text: full, complete: !looksTruncatedText(full) };
+  }
   return {
-    favorites: Array.isArray(library.favorites) ? library.favorites : [],
-    ignored: Array.isArray(library.ignored) ? library.ignored : [],
+    text: String(paper.abstract || "").trim() || "No abstract available.",
+    complete: false,
+  };
+}
+
+function endpointForApiType(apiType) {
+  return (state.modelApiTypes && state.modelApiTypes[apiType]) || "/v1/chat/completions";
+}
+
+function joinModelUrl(baseUrl, endpoint) {
+  const base = String(baseUrl || "").trim().replace(/\/+$/, "");
+  const path = String(endpoint || "").trim();
+  if (!base) {
+    return "未配置";
+  }
+  if (!path) {
+    return base;
+  }
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function currentModelForm() {
+  return {
+    provider: state.selectedProvider || "custom",
+    apiType: elements.modelApiType.value,
+    baseUrl: elements.modelBaseUrl.value.trim(),
+    endpoint: elements.modelEndpoint.value.trim(),
+    model: elements.modelName.value.trim(),
+    apiKey: elements.modelApiKey.value.trim() || undefined,
+  };
+}
+
+function updateModelPreview() {
+  elements.modelFinalUrl.textContent = joinModelUrl(elements.modelBaseUrl.value, elements.modelEndpoint.value);
+}
+
+function setModelStatus(text, type = "") {
+  elements.modelStatusBadge.textContent = text;
+  elements.modelStatusBadge.className = `model-status-badge${type ? ` is-${type}` : ""}`;
+}
+
+function renderProviderCards() {
+  elements.modelProviders.replaceChildren();
+  state.modelProviders.forEach((provider) => {
+    const button = document.createElement("button");
+    button.className = "provider-card";
+    button.classList.toggle("is-active", provider.id === state.selectedProvider);
+    button.type = "button";
+    button.dataset.provider = provider.id;
+
+    const header = document.createElement("span");
+    header.className = "provider-card-title";
+    header.textContent = provider.name;
+
+    const badges = document.createElement("span");
+    badges.className = "provider-badges";
+    (provider.badges || []).forEach((badgeText) => {
+      const badge = document.createElement("small");
+      badge.textContent = badgeText;
+      badges.append(badge);
+    });
+
+    const description = document.createElement("span");
+    description.className = "provider-description";
+    description.textContent = provider.description || provider.domain || "";
+
+    button.append(header, badges, description);
+    button.addEventListener("click", () => applyProvider(provider));
+    elements.modelProviders.append(button);
+  });
+}
+
+function applyProvider(provider) {
+  state.selectedProvider = provider.id || "custom";
+  elements.modelApiType.value = provider.apiType || "chat_completions";
+  elements.modelBaseUrl.value = provider.baseUrl || "";
+  elements.modelEndpoint.value = provider.endpoint || endpointForApiType(elements.modelApiType.value);
+  elements.modelName.value = provider.defaultModel || "";
+  elements.modelApiKey.value = "";
+  renderProviderCards();
+  updateModelPreview();
+  setModelStatus("未测试");
+}
+
+function applyModelSettings(settings = {}) {
+  state.modelSettings = settings;
+  state.selectedProvider = settings.provider || "apixin_gpt";
+  elements.modelApiType.value = settings.apiType || "responses";
+  elements.modelBaseUrl.value = settings.baseUrl || "";
+  elements.modelEndpoint.value = settings.endpoint || endpointForApiType(elements.modelApiType.value);
+  elements.modelName.value = settings.model || "";
+  elements.modelApiKey.value = "";
+  elements.modelKeyHint.textContent = settings.hasApiKey ? `已保存 ${settings.apiKeyMasked || ""}` : "未保存";
+  renderProviderCards();
+  updateModelPreview();
+}
+
+function updateModelConfig(data = {}) {
+  state.modelProviders = Array.isArray(data.providers) ? data.providers : state.modelProviders;
+  state.modelApiTypes = data.apiTypes || state.modelApiTypes || {};
+  applyModelSettings(data.settings || {});
+}
+
+function normalizeLibrary(library = {}) {
+  const favorites = Array.isArray(library.favorites) ? library.favorites : [];
+  const ignored = Array.isArray(library.ignored) ? library.ignored : [];
+  [...favorites, ...ignored].forEach((paper) => {
+    if (paper && paper.paperKey && paper.fulltextTask) {
+      state.fulltextTasks[paper.paperKey] = paper.fulltextTask;
+    }
+  });
+  return {
+    favorites,
+    ignored,
     history: Array.isArray(library.history) ? library.history : [],
     favoriteKeys: Array.isArray(library.favoriteKeys) ? library.favoriteKeys : [],
     ignoredKeys: Array.isArray(library.ignoredKeys) ? library.ignoredKeys : [],
@@ -316,14 +537,398 @@ function isFavorite(paper) {
   return state.library.favoriteKeys.includes(paper.paperKey);
 }
 
+function libraryPaperForKey(key) {
+  if (!key) {
+    return null;
+  }
+  return [...state.library.favorites, ...state.library.ignored]
+    .find((paper) => paper && paper.paperKey === key) || null;
+}
+
+function mergeStoredPaperState(paper, stored) {
+  if (!stored) {
+    return { ...paper };
+  }
+  const merged = { ...paper };
+  const preferredFullAbstract = preferredAbstractText(merged.fullAbstract, stored.fullAbstract);
+  if (preferredFullAbstract) {
+    merged.fullAbstract = preferredFullAbstract;
+  }
+  const hasMergedTranslations = merged.translations
+    && typeof merged.translations === "object"
+    && Object.keys(merged.translations).length > 0;
+  if (!hasMergedTranslations && stored.translations) {
+    merged.translations = stored.translations;
+  }
+  ["fulltextTranslations", "note", "tags", "readingStatus", "fulltextTask"].forEach((field) => {
+    const value = stored[field];
+    if (value !== undefined && value !== null && value !== "") {
+      merged[field] = value;
+    }
+  });
+  if (stored.isDownloaded !== undefined) {
+    merged.isDownloaded = Boolean(stored.isDownloaded);
+  }
+  return merged;
+}
+
 function annotatePaper(paper) {
-  paper.isFavorite = isFavorite(paper);
-  paper.isIgnored = state.library.ignoredKeys.includes(paper.paperKey);
-  return paper;
+  const stored = libraryPaperForKey(paper.paperKey);
+  const annotated = mergeStoredPaperState(paper, stored);
+  annotated.isFavorite = isFavorite(annotated);
+  annotated.isIgnored = state.library.ignoredKeys.includes(annotated.paperKey);
+  if (state.library.downloadKeys.includes(annotated.paperKey)) {
+    annotated.isDownloaded = true;
+  }
+  return annotated;
 }
 
 function syncResultsWithLibrary() {
   state.results = state.results.map(annotatePaper).filter((paper) => !paper.isIgnored);
+}
+
+function createLibraryAction(label, handler, disabled = false) {
+  const button = document.createElement("button");
+  button.className = "library-item-action";
+  button.type = "button";
+  button.textContent = label;
+  button.disabled = disabled;
+  button.addEventListener("click", handler);
+  return button;
+}
+
+function downloadActionLabel(paper) {
+  return !paper.downloadable ? "无 PDF" : paper.isDownloaded ? "已下载" : "下载 PDF";
+}
+
+function favoriteActionLabel(paper) {
+  return paper.isFavorite ? "取消收藏" : "收藏";
+}
+
+function abstractActionLabel(paper) {
+  return zhTranslation(paper) ? "重译摘要" : "翻译摘要";
+}
+
+function fulltextTaskForPaper(paper) {
+  return state.fulltextTasks[paper.paperKey || ""];
+}
+
+function fulltextProgressPercent(task) {
+  const total = Number(task && task.totalChunks) || 0;
+  if (!total) {
+    return 0;
+  }
+  return Math.round(((Number(task.completedChunks) || 0) / total) * 100);
+}
+
+function fulltextActionLabel(paper) {
+  const task = fulltextTaskForPaper(paper);
+  if (!task) {
+    return "全文翻译";
+  }
+  if (task.status === "done") {
+    return "重新全文翻译";
+  }
+  if (task.status === "failed" || task.canResume) {
+    return "继续全文翻译";
+  }
+  if (task.status === "running" || task.status === "queued") {
+    return "翻译中";
+  }
+  return "全文翻译";
+}
+
+function fulltextActionDisabled(paper) {
+  const task = fulltextTaskForPaper(paper);
+  return !paper.isDownloaded || Boolean(task && ["running", "queued"].includes(task.status));
+}
+
+function canOpenFulltextFolder(task) {
+  return Boolean(task && task.status === "done" && task.file);
+}
+
+function createFulltextProgress(paper) {
+  const task = fulltextTaskForPaper(paper);
+  if (!task) {
+    return null;
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = `fulltext-task is-${task.status || "queued"}`;
+
+  const header = document.createElement("div");
+  header.className = "fulltext-task-header";
+
+  const status = document.createElement("span");
+  const total = Number(task.totalChunks) || 0;
+  const done = Number(task.completedChunks) || 0;
+  const failed = Number(task.failedChunks) || 0;
+  status.textContent = task.status === "done"
+    ? `全文翻译完成 ${done}/${total}`
+    : (task.status === "failed" || task.status === "partial")
+      ? `全文翻译暂停 ${done}/${total}${failed ? `，失败 ${failed}` : ""}`
+      : `全文翻译进行中 ${done}/${total}`;
+
+  const percent = document.createElement("strong");
+  percent.textContent = `${fulltextProgressPercent(task)}%`;
+  header.append(status, percent);
+
+  const track = document.createElement("div");
+  track.className = "fulltext-progress";
+  const bar = document.createElement("span");
+  bar.style.width = `${fulltextProgressPercent(task)}%`;
+  track.append(bar);
+
+  wrap.append(header, track);
+
+  if (task.error) {
+    const error = document.createElement("p");
+    error.className = "fulltext-task-error";
+    error.textContent = task.error;
+    wrap.append(error);
+  } else if (task.file) {
+    const file = document.createElement("p");
+    file.className = "fulltext-task-file";
+    file.textContent = task.file;
+    wrap.append(file);
+  }
+  if (canOpenFulltextFolder(task)) {
+    const openButton = createLibraryAction("打开所在文件夹", (event) => openFulltextFolder(paper, task, event.currentTarget));
+    openButton.classList.add("fulltext-open-folder");
+    wrap.append(openButton);
+  }
+  return wrap;
+}
+
+function libraryStatusText(paper) {
+  const badges = [];
+  const status = readingStatusLabels[paper.readingStatus || ""];
+  if (status && paper.readingStatus) {
+    badges.push(status);
+  }
+  if (zhTranslation(paper)) {
+    badges.push("摘要已翻译");
+  }
+  const task = fulltextTaskForPaper(paper);
+  if (task) {
+    badges.push(task.status === "done" ? "全文翻译完成" : "全文处理中");
+  }
+  if (paper.isDownloaded) {
+    badges.push("已下载");
+  }
+  return badges.join(" · ");
+}
+
+function createLibraryTagList(paper) {
+  if (!Array.isArray(paper.tags) || !paper.tags.length) {
+    return null;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "library-tag-list";
+  paper.tags
+    .map((tag) => String(tag || "").trim())
+    .filter(Boolean)
+    .forEach((tag) => {
+      const chip = document.createElement("span");
+      chip.className = "library-tag";
+      chip.textContent = tag;
+      wrap.append(chip);
+    });
+  return wrap;
+}
+
+function createLibraryNote(paper) {
+  const text = String(paper.note || "").trim();
+  if (!text) {
+    return null;
+  }
+  const wrap = document.createElement("div");
+  wrap.className = "library-note-block";
+
+  const label = document.createElement("span");
+  label.className = "library-note-label";
+  label.textContent = "备注";
+
+  const note = document.createElement("p");
+  note.className = "library-note";
+  note.textContent = text;
+
+  wrap.append(label, note);
+  return wrap;
+}
+
+function createLibraryMoreActions(actions) {
+  const wrap = document.createElement("details");
+  wrap.className = "library-more-actions";
+
+  const summary = document.createElement("summary");
+  summary.className = "library-more-toggle";
+  summary.textContent = "更多操作";
+
+  const panel = document.createElement("div");
+  panel.className = "library-more-panel";
+  actions.forEach((action) => panel.append(action));
+
+  wrap.append(summary, panel);
+  return wrap;
+}
+
+function createLibraryItem(paper, view) {
+  const key = paper.paperKey || `${paper.source || "paper"}-${paper.paperId || paper.title || "untitled"}`;
+  const item = document.createElement("details");
+  item.className = "library-item";
+  item.open = Boolean(state.expandedLibraryItems[key]);
+  item.addEventListener("toggle", () => {
+    state.expandedLibraryItems[key] = item.open;
+  });
+
+  const header = document.createElement("summary");
+  header.className = "library-item-header";
+
+  const headerText = document.createElement("span");
+  headerText.className = "library-item-title-block";
+
+  const title = document.createElement("strong");
+  title.textContent = paper.title || "Untitled";
+  title.title = paper.title || "";
+
+  const meta = document.createElement("span");
+  meta.textContent = paperDisplayMeta(paper);
+
+  headerText.append(title, meta);
+
+  const status = document.createElement("small");
+  status.className = "library-item-status";
+  status.textContent = libraryStatusText(paper) || (view === "ignored" ? "已忽略" : "展开");
+  header.append(headerText, status);
+
+  const body = document.createElement("div");
+  body.className = "library-item-body";
+
+  const actions = document.createElement("div");
+  actions.className = "library-item-actions";
+
+  const openLink = document.createElement("a");
+  openLink.className = "library-item-action";
+  openLink.href = paperUrl(paper);
+  openLink.target = "_blank";
+  openLink.rel = "noreferrer";
+  openLink.textContent = "来源";
+  openLink.title = "打开来源页面";
+
+  actions.append(openLink);
+  let moreActions = null;
+
+  if (view === "favorites") {
+    const translation = zhTranslation(paper);
+    const abstractDisplay = abstractDisplayForPaper(paper);
+    const tags = createLibraryTagList(paper);
+    const note = createLibraryNote(paper);
+    if (tags) {
+      body.append(tags);
+    }
+    if (note) {
+      body.append(note);
+    }
+    if (translation) {
+      body.append(createTranslationBlock(translation, true, abstractDisplay.complete));
+    }
+    const fulltextProgress = createFulltextProgress(paper);
+    if (fulltextProgress) {
+      body.append(fulltextProgress);
+    }
+    body.append(createPaperEditor(paper));
+    actions.append(
+      createLibraryAction(downloadActionLabel(paper), () => downloadLibraryPaper(paper), !paper.downloadable || paper.isDownloaded),
+      createLibraryAction(abstractActionLabel(paper), () => translateLibraryPaper(paper)),
+      createLibraryAction(fulltextActionLabel(paper), () => translateFulltextPaper(paper), fulltextActionDisabled(paper)),
+    );
+    moreActions = createLibraryMoreActions([
+      createLibraryAction("导出 BibTeX", (event) => exportLibraryPaperFile(paper, "bibtex", event.currentTarget)),
+      createLibraryAction("导出原文摘要", (event) => exportLibraryPaperFile(paper, "markdown", event.currentTarget)),
+      createLibraryAction("导出带译文摘要", (event) => exportLibraryPaperFile(paper, "bilingual_markdown", event.currentTarget), !zhTranslation(paper)),
+      createLibraryAction("取消收藏", () => updateLibraryPaperFromPanel("unfavorite", paper)),
+    ]);
+  } else {
+    actions.append(createLibraryAction("恢复", () => updateLibraryPaperFromPanel("unignore", paper)));
+  }
+
+  body.append(actions);
+  if (moreActions) {
+    body.append(moreActions);
+  }
+  item.append(header, body);
+  return item;
+}
+
+function createPaperEditor(paper) {
+  const editorWrap = document.createElement("details");
+  editorWrap.className = "paper-editor-wrap";
+
+  const summary = document.createElement("summary");
+  summary.className = "paper-editor-toggle";
+  summary.textContent = "管理信息";
+
+  const editor = document.createElement("div");
+  editor.className = "paper-editor";
+
+  const status = document.createElement("select");
+  status.className = "paper-editor-input";
+  Object.entries(readingStatusLabels).forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    status.append(option);
+  });
+  status.value = paper.readingStatus || "";
+
+  const tags = document.createElement("input");
+  tags.className = "paper-editor-input";
+  tags.type = "text";
+  tags.placeholder = "标签，用逗号分隔";
+  tags.value = Array.isArray(paper.tags) ? paper.tags.join(", ") : "";
+
+  const note = document.createElement("textarea");
+  note.className = "paper-editor-input";
+  note.rows = 2;
+  note.placeholder = "备注";
+  note.value = paper.note || "";
+
+  const save = document.createElement("button");
+  save.className = "library-item-action";
+  save.type = "button";
+  save.textContent = "保存管理信息";
+  save.addEventListener("click", () => updatePaperMetadata(paper, {
+    readingStatus: status.value,
+    tags: tags.value,
+    note: note.value,
+  }, save));
+
+  editor.append(status, tags, note, save);
+  editorWrap.append(summary, editor);
+  return editorWrap;
+}
+
+function renderLibraryItems() {
+  elements.libraryTabs.forEach((button) => {
+    const isActive = button.dataset.libraryView === state.libraryView;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+
+  elements.libraryItems.replaceChildren();
+  const items = state.libraryView === "ignored" ? state.library.ignored : state.library.favorites;
+  if (!items.length) {
+    const empty = document.createElement("span");
+    empty.className = "history-empty";
+    empty.textContent = state.libraryView === "ignored" ? "暂无忽略论文" : "暂无收藏论文";
+    elements.libraryItems.append(empty);
+    return;
+  }
+
+  items.forEach((paper) => {
+    elements.libraryItems.append(createLibraryItem(paper, state.libraryView));
+  });
 }
 
 function renderLibrary() {
@@ -333,12 +938,15 @@ function renderLibrary() {
   elements.ignoredCount.textContent = String(ignoredCount);
   elements.exportFavoritesBib.disabled = favoriteCount === 0;
   elements.exportFavoritesMarkdown.disabled = favoriteCount === 0;
+  elements.exportFavoritesBilingual.disabled = favoriteCount === 0;
+  elements.batchTranslate.disabled = favoriteCount === 0;
   elements.refreshFavorites.disabled = favoriteCount === 0;
   elements.clearHistory.disabled = state.library.history.length === 0;
-  const staleCount = state.library.favorites.filter((paper) => !paper.fullAbstract).length;
+  const staleCount = state.library.favorites.filter((paper) => !abstractDisplayForPaper(paper).complete).length;
   elements.libraryRefreshNote.textContent = staleCount
     ? `${staleCount} 篇收藏可能只有截断摘要，可刷新补全可获取的元数据。`
     : "收藏元数据已包含完整摘要或来源未提供更多内容。";
+  renderLibraryItems();
 
   elements.searchHistory.replaceChildren();
   if (!state.library.history.length) {
@@ -381,16 +989,50 @@ function updateLibrary(library) {
   renderLibrary();
 }
 
+function sentenceJoin(parts) {
+  return parts
+    .map((part) => String(part || "").trim().replace(/[。.!?]+$/u, ""))
+    .filter(Boolean)
+    .join("。");
+}
+
 function downloadTextFile(filename, content, mimeType) {
   const blob = new Blob([content], { type: mimeType || "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
+  link.rel = "noopener";
   document.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadBinaryFile(filename, base64Content, mimeType) {
+  const bytes = Uint8Array.from(atob(base64Content), (char) => char.charCodeAt(0));
+  const blob = new Blob([bytes], { type: mimeType || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      resolve(result.includes(",") ? result.split(",").pop() : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("文件读取失败。"));
+    reader.readAsDataURL(file);
+  });
 }
 
 async function copyText(text) {
@@ -431,11 +1073,25 @@ function createPaperCard(paper, index) {
   authors.className = "authors";
   authors.textContent = paper.authors || "Unknown authors";
 
+  const abstractDisplay = abstractDisplayForPaper(paper);
+  const abstractWrap = document.createElement("div");
+  abstractWrap.className = `abstract-block${abstractDisplay.complete ? "" : " is-fallback"}`;
+
+  const abstractLabel = document.createElement("span");
+  abstractLabel.className = "abstract-label";
+  abstractLabel.textContent = abstractDisplay.complete ? "原文摘要" : "来源摘要可能不完整";
+
   const abstract = document.createElement("p");
   abstract.className = "abstract";
-  abstract.textContent = paper.abstract || "No abstract available.";
+  abstract.textContent = abstractDisplay.text;
+  abstractWrap.append(abstractLabel, abstract);
 
-  content.append(meta, title, authors, abstract);
+  content.append(meta, title, authors, abstractWrap);
+
+  const translation = zhTranslation(paper);
+  if (translation) {
+    content.append(createTranslationBlock(translation, false, abstractDisplay.complete));
+  }
 
   const actions = document.createElement("div");
   actions.className = "paper-actions";
@@ -444,7 +1100,7 @@ function createPaperCard(paper, index) {
   downloadButton.className = "paper-action";
   downloadButton.type = "button";
   downloadButton.dataset.index = String(index);
-  downloadButton.textContent = !paper.downloadable ? "无 PDF" : paper.isDownloaded ? "已保存" : "下载 PDF";
+  downloadButton.textContent = downloadActionLabel(paper);
   downloadButton.disabled = Boolean(paper.isDownloaded) || !paper.downloadable;
   downloadButton.addEventListener("click", () => downloadPaper(index, downloadButton));
 
@@ -460,7 +1116,7 @@ function createPaperCard(paper, index) {
   const favoriteButton = document.createElement("button");
   favoriteButton.className = "paper-action";
   favoriteButton.type = "button";
-  favoriteButton.textContent = paper.isFavorite ? "取消收藏" : "收藏";
+  favoriteButton.textContent = favoriteActionLabel(paper);
   favoriteButton.addEventListener("click", () => toggleFavorite(index, favoriteButton));
 
   const ignoreButton = document.createElement("button");
@@ -472,18 +1128,39 @@ function createPaperCard(paper, index) {
   const copyBibButton = document.createElement("button");
   copyBibButton.className = "paper-action";
   copyBibButton.type = "button";
-  copyBibButton.textContent = "复制 BibTeX";
-  copyBibButton.addEventListener("click", () => copyPaperExport(index, "bibtex"));
+  copyBibButton.textContent = "导出 BibTeX";
+  copyBibButton.addEventListener("click", () => exportPaperFile(index, "bibtex", copyBibButton));
 
-  const copyMarkdownButton = document.createElement("button");
-  copyMarkdownButton.className = "paper-action";
-  copyMarkdownButton.type = "button";
-  copyMarkdownButton.textContent = "复制 Markdown";
-  copyMarkdownButton.addEventListener("click", () => copyPaperExport(index, "markdown"));
+  const copyOriginalMarkdownButton = document.createElement("button");
+  copyOriginalMarkdownButton.className = "paper-action";
+  copyOriginalMarkdownButton.type = "button";
+  copyOriginalMarkdownButton.textContent = "导出原文摘要";
+  copyOriginalMarkdownButton.addEventListener("click", () => exportPaperFile(index, "markdown", copyOriginalMarkdownButton));
+
+  const copyBilingualMarkdownButton = document.createElement("button");
+  copyBilingualMarkdownButton.className = "paper-action";
+  copyBilingualMarkdownButton.type = "button";
+  copyBilingualMarkdownButton.textContent = "导出带译文摘要";
+  copyBilingualMarkdownButton.disabled = !translation;
+  copyBilingualMarkdownButton.title = translation ? "导出包含中英文摘要的 Markdown" : "先翻译摘要后可导出带译文摘要";
+  copyBilingualMarkdownButton.addEventListener("click", () => exportPaperFile(index, "bilingual_markdown", copyBilingualMarkdownButton));
+
+  const translateButton = document.createElement("button");
+  translateButton.className = "paper-action";
+  translateButton.type = "button";
+  translateButton.textContent = abstractActionLabel(paper);
+  translateButton.addEventListener("click", () => translateResultPaper(index, translateButton));
 
   const secondaryActions = document.createElement("div");
   secondaryActions.className = "paper-secondary-actions";
-  secondaryActions.append(favoriteButton, ignoreButton, copyBibButton, copyMarkdownButton);
+  secondaryActions.append(
+    favoriteButton,
+    translateButton,
+    ignoreButton,
+    copyBibButton,
+    copyOriginalMarkdownButton,
+    copyBilingualMarkdownButton,
+  );
 
   actions.append(downloadButton, link, secondaryActions);
   card.append(content, actions);
@@ -513,6 +1190,28 @@ function renderResults() {
   });
 }
 
+function timeoutMessageForRequest(url) {
+  if (url.includes("/api/search")) {
+    return "检索超时。可以减少数据源，或先只选 arXiv / CVF 试一次。";
+  }
+  if (url.includes("/api/settings/test")) {
+    return "模型连接测试超时。请检查 Base URL、Endpoint、模型名称，或稍后再试。";
+  }
+  if (url.includes("/api/translate/fulltext")) {
+    return "全文翻译请求超时。任务可能仍在后台处理，请稍后查看状态。";
+  }
+  if (url.includes("/api/translate")) {
+    return "摘要翻译超时。可以稍后重试，或换用响应更快的模型。";
+  }
+  if (url.includes("/api/download")) {
+    return "PDF 下载超时。可以稍后重试，或打开来源页面手动下载。";
+  }
+  if (url.includes("/api/backup")) {
+    return "备份操作超时。请确认文件大小和本地服务状态后重试。";
+  }
+  return "请求超时，请稍后重试。";
+}
+
 async function requestJson(url, payload, timeoutMs = 22000) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -530,7 +1229,7 @@ async function requestJson(url, payload, timeoutMs = 22000) {
     return data;
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error("检索超时。可以减少数据源，或先只选 arXiv / CVF 试一次。");
+      throw new Error(timeoutMessageForRequest(url));
     }
     throw error;
   } finally {
@@ -542,13 +1241,311 @@ async function refreshStatus() {
   const response = await fetch("/api/status");
   const data = await response.json();
   elements.savedCount.textContent = String(data.downloadedCount || 0);
+  updateModelConfig({
+    providers: data.modelProviders || [],
+    apiTypes: data.modelApiTypes || {},
+    settings: data.modelSettings || {},
+  });
   updateLibrary(data.library || {});
+}
+
+async function refreshModelSettings() {
+  const response = await fetch("/api/settings");
+  const data = await response.json();
+  if (!response.ok || data.ok === false) {
+    throw new Error(data.error || "模型设置读取失败。");
+  }
+  updateModelConfig(data);
+}
+
+async function saveModelSettings() {
+  const originalText = elements.saveModel.textContent;
+  elements.saveModel.disabled = true;
+  elements.saveModel.textContent = "保存中";
+  try {
+    const data = await requestJson("/api/settings", { settings: currentModelForm() });
+    updateModelConfig(data);
+    setModelStatus("已保存", "success");
+    setMessage("模型设置已保存。", "success");
+  } catch (error) {
+    setModelStatus("保存失败", "error");
+    setMessage(error.message, "error");
+  } finally {
+    elements.saveModel.disabled = false;
+    elements.saveModel.textContent = originalText;
+  }
+}
+
+async function testModelConnection() {
+  const originalText = elements.testModel.textContent;
+  elements.testModel.disabled = true;
+  elements.testModel.textContent = "测试中";
+  setModelStatus("测试中");
+  try {
+    const data = await requestJson("/api/settings/test", { settings: currentModelForm() }, 60000);
+    setModelStatus("连接正常", "success");
+    const usageText = data.usage && Object.keys(data.usage).length
+      ? ` Usage: ${JSON.stringify(data.usage)}`
+      : "";
+    setMessage(`${data.message} 返回：${data.sample || "OK"}。${usageText}`, "success");
+  } catch (error) {
+    setModelStatus("测试失败", "error");
+    setMessage(error.message, "error");
+  } finally {
+    elements.testModel.disabled = false;
+    elements.testModel.textContent = originalText;
+  }
 }
 
 async function updatePaperLibrary(action, paper) {
   const data = await requestJson("/api/library", { action, paper, paperKey: paper.paperKey });
   updateLibrary(data.library || {});
   return data;
+}
+
+async function updateLibraryPaperFromPanel(action, paper) {
+  try {
+    await updatePaperLibrary(action, paper);
+    const messages = {
+      unfavorite: "已从收藏列表移除。",
+      unignore: "已恢复该论文，后续检索会重新显示。",
+    };
+    setMessage(messages[action] || "本地收件箱已更新。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function downloadLibraryPaper(paper) {
+  if (!paper || !paper.downloadable || paper.isDownloaded) {
+    return;
+  }
+  setMessage(`正在下载：${paper.title}`);
+  try {
+    const data = await requestJson("/api/download", paper, 60000);
+    elements.savedCount.textContent = String(data.downloadedCount || 0);
+    await refreshStatus();
+    setMessage(`${data.message} ${data.filename}`, "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+function exportFormatLabel(format) {
+  if (format === "bibtex") {
+    return "BibTeX";
+  }
+  if (format === "bilingual_markdown") {
+    return "带译文摘要 Markdown";
+  }
+  return "原文摘要 Markdown";
+}
+
+function safeFilenamePart(text) {
+  return String(text || "paper")
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, " ")
+    .replace(/\s+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90) || "paper";
+}
+
+function singlePaperExportFilename(paper, format) {
+  const base = safeFilenamePart(paper.title || paper.paperId || paper.paperKey || "paper");
+  if (format === "bibtex") {
+    return `${base}.bib`;
+  }
+  if (format === "bilingual_markdown") {
+    return `${base}.bilingual.md`;
+  }
+  return `${base}.abstract.md`;
+}
+
+async function exportLibraryPaperFile(paper, format, button = null) {
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导出中";
+  }
+  try {
+    const data = await exportPapers({ scope: "results", format, papers: [paper], download: false });
+    downloadTextFile(singlePaperExportFilename(paper, format), data.content, data.mimeType);
+    setMessage(`收藏 ${exportFormatLabel(format)} 已导出。`, "success");
+    if (button) {
+      button.textContent = "已导出";
+      window.setTimeout(() => {
+        button.textContent = originalText;
+      }, 900);
+    }
+  } catch (error) {
+    setMessage(error.message, "error");
+    if (button) {
+      button.textContent = originalText;
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
+  }
+}
+
+async function openFulltextFolder(paper, task, button) {
+  if (!task || !task.file) {
+    return;
+  }
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "打开中";
+  }
+  try {
+    const data = await requestJson("/api/open/fulltext-folder", {
+      paperKey: paper.paperKey,
+      taskId: task.taskId,
+      file: task.file,
+    });
+    setMessage(`已打开译文所在位置：${data.file || task.file}`, "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function translatePaper(paper, button) {
+  if (!paper) {
+    return;
+  }
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "翻译中";
+  }
+  setMessage("正在翻译摘要，内容会发送到你配置的模型接口...");
+  try {
+    const data = await requestJson("/api/translate/abstract", { paper, paperKey: paper.paperKey }, 90000);
+    if (!paper.translations || typeof paper.translations !== "object") {
+      paper.translations = {};
+    }
+    paper.translations.zh = data.translation;
+    updateLibrary(data.library || state.library);
+    setMessage("中文摘要已保存到本地论文记录。加入收藏后可在收件箱集中管理。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+}
+
+async function translateLibraryPaper(paper) {
+  await translatePaper(paper, null);
+}
+
+async function translateResultPaper(index, button) {
+  await translatePaper(state.results[index], button);
+}
+
+function rememberFulltextTask(task) {
+  if (!task || !task.paperKey) {
+    return;
+  }
+  state.fulltextTasks[task.paperKey] = task;
+  renderLibrary();
+}
+
+function stopFulltextPolling(paperKey) {
+  const timer = state.fulltextPollers[paperKey];
+  if (timer) {
+    window.clearInterval(timer);
+    delete state.fulltextPollers[paperKey];
+  }
+}
+
+async function pollFulltextTask(task, paper) {
+  if (!task || !task.taskId || !paper || !paper.paperKey) {
+    return;
+  }
+
+  stopFulltextPolling(paper.paperKey);
+  const poll = async () => {
+    try {
+      const data = await requestJson("/api/translate/fulltext/status", {
+        taskId: task.taskId,
+        paperKey: paper.paperKey,
+      }, 20000);
+      rememberFulltextTask(data.task);
+      if (data.library) {
+        updateLibrary(data.library);
+      }
+
+      const current = data.task || {};
+      if (current.status === "done") {
+        stopFulltextPolling(paper.paperKey);
+        await refreshStatus();
+        setMessage(`全文翻译完成：${current.file || current.filename}。已确认所有片段连续写入。`, "success");
+        renderResults();
+      } else if (current.status === "failed") {
+        stopFulltextPolling(paper.paperKey);
+        setMessage(`全文翻译暂停，可点击“继续全文翻译”续跑。${current.error || ""}`, "error");
+      }
+    } catch (error) {
+      stopFulltextPolling(paper.paperKey);
+      setMessage(error.message, "error");
+    }
+  };
+
+  await poll();
+  if (state.fulltextTasks[paper.paperKey] && ["queued", "running"].includes(state.fulltextTasks[paper.paperKey].status)) {
+    state.fulltextPollers[paper.paperKey] = window.setInterval(poll, 2000);
+  }
+}
+
+async function translateFulltextPaper(paper) {
+  if (!paper) {
+    return;
+  }
+  const existingTask = fulltextTaskForPaper(paper);
+  const force = Boolean(existingTask && existingTask.status === "done");
+  setMessage("已启动全文翻译任务，会逐块翻译并校验片段连续性。");
+  try {
+    const data = await requestJson("/api/translate/fulltext", { paper, paperKey: paper.paperKey, force }, 30000);
+    rememberFulltextTask(data.task);
+    updateLibrary(data.library || state.library);
+    await pollFulltextTask(data.task, paper);
+  } catch (error) {
+    setMessage(error.message, "error");
+  }
+}
+
+async function updatePaperMetadata(paper, updates, button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "保存中";
+  try {
+    const data = await requestJson("/api/library", {
+      action: "update-paper",
+      paper,
+      paperKey: paper.paperKey,
+      updates,
+    });
+    updateLibrary(data.library || {});
+    setMessage("阅读状态、标签和备注已保存。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 async function toggleFavorite(index, button) {
@@ -648,17 +1645,92 @@ async function exportFavorites(format) {
   }
 }
 
-async function copyPaperExport(index, format) {
-  const paper = state.results[index];
-  if (!paper) {
+async function batchTranslateFavorites() {
+  const originalText = elements.batchTranslate.textContent;
+  elements.batchTranslate.disabled = true;
+  elements.batchTranslate.textContent = "翻译中";
+  setMessage("正在批量翻译收藏摘要，只处理未翻译或可能过期的条目...");
+  try {
+    const data = await requestJson("/api/translate/batch", { scope: "favorites" }, 180000);
+    updateLibrary(data.library || state.library);
+    const usageText = data.usage && Object.keys(data.usage).length
+      ? ` Usage: ${JSON.stringify(data.usage)}`
+      : "";
+    const failedText = data.failed ? `，${data.failed} 篇失败` : "";
+    setMessage(`批量翻译完成：已翻译 ${data.translated || 0} 篇，跳过 ${data.skipped || 0} 篇${failedText}。${usageText}`, data.failed ? "" : "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    elements.batchTranslate.textContent = originalText;
+    elements.batchTranslate.disabled = state.library.favorites.length === 0;
+  }
+}
+
+async function exportWorkspaceBackup() {
+  const originalText = elements.exportBackup.textContent;
+  elements.exportBackup.disabled = true;
+  elements.exportBackup.textContent = "导出中";
+  try {
+    window.open("/api/backup/export", "_blank", "noopener");
+    setMessage("已开始导出全量备份。大文件可能需要等待几秒。", "success");
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    elements.exportBackup.disabled = false;
+    elements.exportBackup.textContent = originalText;
+  }
+}
+
+async function importWorkspaceBackup(event) {
+  const file = event.target.files && event.target.files[0];
+  if (!file) {
     return;
+  }
+  setMessage("正在导入备份...");
+  try {
+    const contentBase64 = await fileToBase64(file);
+    const data = await requestJson("/api/backup/import", { contentBase64, strategy: "merge" }, 120000);
+    updateLibrary(data.library || state.library);
+    updateModelConfig({ settings: data.settings || state.modelSettings });
+    setMessage("备份已导入。API Key 不会从备份恢复，请按需重新填写。", "success");
+    renderResults();
+  } catch (error) {
+    setMessage(error.message, "error");
+  } finally {
+    event.target.value = "";
+  }
+}
+
+async function exportPaperFile(index, format, button = null) {
+  const paper = state.results[index];
+  if (!paper || (button && button.disabled)) {
+    return;
+  }
+  const originalText = button ? button.textContent : "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "导出中";
   }
   try {
     const data = await exportPapers({ scope: "results", format, papers: [paper], download: false });
-    await copyText(data.content);
-    setMessage(format === "bibtex" ? "BibTeX 已复制。" : "Markdown 已复制。", "success");
+    downloadTextFile(singlePaperExportFilename(paper, format), data.content, data.mimeType);
+    setMessage(`${exportFormatLabel(format)} 已导出。`, "success");
+    if (button) {
+      button.textContent = "已导出";
+      window.setTimeout(() => {
+        button.textContent = originalText;
+      }, 900);
+    }
   } catch (error) {
     setMessage(error.message, "error");
+    if (button) {
+      button.textContent = originalText;
+    }
+  } finally {
+    if (button) {
+      button.disabled = false;
+    }
   }
 }
 
@@ -719,10 +1791,17 @@ async function performSearch(event) {
       : "";
     const sourceBreakdown = formatSourceCounts(data.sourceCounts);
     const issueText = summarizeErrors(data.errors);
-    const hiddenText = data.hiddenIgnoredCount ? `已隐藏 ${data.hiddenIgnoredCount} 篇忽略论文。` : "";
-    const suffix = errorCount ? `，有 ${errorCount} 个来源暂时失败。${issueText}` : "。";
-    const breakdownText = sourceBreakdown ? `来源分布：${sourceBreakdown}。` : "";
-    setMessage(`找到 ${state.results.length} 篇论文${countText}。${breakdownText}${hiddenText}${suffix}`, state.results.length ? "success" : "");
+    const messageParts = [`找到 ${state.results.length} 篇论文${countText}`];
+    if (sourceBreakdown) {
+      messageParts.push(`来源分布：${sourceBreakdown}`);
+    }
+    if (data.hiddenIgnoredCount) {
+      messageParts.push(`已隐藏 ${data.hiddenIgnoredCount} 篇忽略论文`);
+    }
+    if (errorCount) {
+      messageParts.push(`有 ${errorCount} 个来源暂时失败${issueText ? `：${issueText}` : ""}`);
+    }
+    setMessage(`${sentenceJoin(messageParts)}。`, state.results.length ? "success" : "");
     setProgress(100);
     window.setTimeout(() => setProgress(0), 650);
   } catch (error) {
@@ -847,8 +1926,26 @@ elements.downloadAll.addEventListener("click", downloadAll);
 elements.exportResults.addEventListener("click", exportCurrentResults);
 elements.exportFavoritesBib.addEventListener("click", () => exportFavorites("bibtex"));
 elements.exportFavoritesMarkdown.addEventListener("click", () => exportFavorites("markdown"));
+elements.exportFavoritesBilingual.addEventListener("click", () => exportFavorites("bilingual_markdown"));
+elements.batchTranslate.addEventListener("click", batchTranslateFavorites);
 elements.refreshFavorites.addEventListener("click", refreshFavoritesMetadata);
 elements.clearHistory.addEventListener("click", clearHistory);
+elements.modelApiType.addEventListener("change", () => {
+  elements.modelEndpoint.value = endpointForApiType(elements.modelApiType.value);
+  updateModelPreview();
+});
+elements.modelBaseUrl.addEventListener("input", updateModelPreview);
+elements.modelEndpoint.addEventListener("input", updateModelPreview);
+elements.saveModel.addEventListener("click", saveModelSettings);
+elements.testModel.addEventListener("click", testModelConnection);
+elements.exportBackup.addEventListener("click", exportWorkspaceBackup);
+elements.importBackup.addEventListener("change", importWorkspaceBackup);
+elements.libraryTabs.forEach((button) => {
+  button.addEventListener("click", () => {
+    state.libraryView = button.dataset.libraryView || "favorites";
+    renderLibraryItems();
+  });
+});
 
 updateSortButtons();
 updateSourceSummary();
@@ -857,3 +1954,4 @@ renderExternalGateways();
 refreshStatus().catch(() => {
   setMessage("后端状态读取失败，请确认 Python 服务正在运行。", "error");
 });
+refreshModelSettings().catch(() => {});

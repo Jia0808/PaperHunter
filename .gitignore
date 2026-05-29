@@ -15,6 +15,7 @@ env/
 .cache/
 data/
 downloaded_papers/
+translated_papers/
 *.pdf
 *.tmp
 
