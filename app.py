@@ -1354,10 +1354,22 @@ def write_fulltext_task_markdown(task: dict) -> Path:
 
 
 def translated_relative_path(path: Path) -> str:
+    clean_path = Path(path)
     try:
-        return path.relative_to(ROOT_DIR).as_posix()
+        return clean_path.relative_to(ROOT_DIR).as_posix()
     except ValueError:
-        return f"translated_papers/{path.relative_to(TRANSLATED_DIR).as_posix()}"
+        pass
+    try:
+        return f"translated_papers/{clean_path.relative_to(TRANSLATED_DIR).as_posix()}"
+    except ValueError:
+        parts = clean_path.parts
+        translated_dir_name = TRANSLATED_DIR.name.lower()
+        for index, part in enumerate(parts):
+            if part.lower() == translated_dir_name:
+                relative_parts = parts[index + 1 :]
+                if relative_parts:
+                    return Path("translated_papers", *relative_parts).as_posix()
+        raise
 
 
 def update_fulltext_translation_index(library: dict, key: str, paper: dict, output_path: Path, model: str) -> None:

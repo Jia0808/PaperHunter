@@ -164,6 +164,14 @@ class LibraryTests(unittest.TestCase):
         popen.assert_called_once()
         self.assertEqual("explorer", popen.call_args.args[0][0])
 
+    def test_translated_relative_path_falls_back_to_translated_dir_segment(self):
+        path = Path("C:/Users/runneradmin/AppData/Local/Temp/tmp123/translated_papers/sample.bilingual.md")
+
+        with patch.object(app, "TRANSLATED_DIR", Path("C:/Users/RUNNER~1/AppData/Local/Temp/tmp123/translated_papers")):
+            relative = app.translated_relative_path(path)
+
+        self.assertEqual("translated_papers/sample.bilingual.md", relative)
+
     def test_update_library_persists_favorite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             library_path = Path(tmpdir) / "library.json"
