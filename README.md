@@ -26,11 +26,15 @@ The project uses a plain Python backend and a native HTML/CSS/JavaScript fronten
 - Research-friendly filters for intent, field, year range, author, venue, match scope, arXiv category, and downloadable-only results.
 - Per-source result limits, so one large source does not dominate the list.
 - Local PDF download with duplicate detection.
-- Local paper inbox for favorites, ignored papers, recent searches, and download status, stored in `data/library.json`.
-- BibTeX and Markdown reading-list export for saved favorites, including full abstracts when source metadata provides them.
-- Favorite metadata refresh to update older saved records and recover full abstracts when available.
+- Local paper inbox for favorites, ignored papers, reading status, tags, notes, recent searches, download status, and full-text translation state, stored in `data/library.json`.
+- Model settings panel for OpenAI-compatible Responses/Chat Completions endpoints, DeepSeek, Anthropic, and custom providers.
+- Abstract translation for a single paper or a batch of favorites, with stale-translation detection when source abstracts change.
+- BibTeX, Markdown reading-list, and bilingual English/Chinese summary exports for saved favorites or individual papers.
+- Full-text translation for downloaded PDFs, with resumable chunk tasks, progress tracking, bilingual Markdown output, and an action to open the translated file location.
+- Favorite metadata refresh to update older saved records and recover full abstracts when available; ChinaRxiv results can hydrate truncated feed abstracts from detail pages.
+- Workspace backup and import for local library data, downloads, translated papers, and translation tasks. API keys are stripped from backups.
 - External gateway buttons for Google Scholar, CNKI, Wanfang, X-MOL, Nature, Science, and other sources that usually require login, institutional permission, payment, robots.txt restrictions, or CAPTCHA.
-- Local-first workflow: downloaded PDFs stay under `downloaded_papers/`, and library state stays under `data/`; both are ignored by Git.
+- Local-first workflow: downloaded PDFs stay under `downloaded_papers/`, translated Markdown stays under `translated_papers/`, and library/settings state stays under `data/`; these runtime paths are ignored by Git.
 - Lightweight stack: Python 3.12, `requests`, `arxiv`, and browser-native frontend code.
 
 ## Supported Sources
@@ -42,7 +46,7 @@ The project uses a plain Python backend and a native HTML/CSS/JavaScript fronten
 | CVF Open Access | Yes | Yes | Searches public CVF Open Access pages. |
 | ACL Anthology | Yes | Yes | Uses ACL Anthology metadata/cache. |
 | OpenReview | Yes | Public open PDFs only | Some PDFs may require validation by the host. |
-| ChinaRxiv / ChinaXiv | Yes | Public open PDFs only | Domestic open paper source. |
+| ChinaRxiv / ChinaXiv | Yes | Public open PDFs only | Domestic open paper source; detail pages are used when feed abstracts are truncated. |
 | SciOpen | Yes | Public open PDFs only | Domestic/open-access source. |
 | National Science Open | Yes | Public open PDFs only | Open journal source. |
 | Google Scholar, CNKI, Wanfang, X-MOL, Nature, Science | External gateway only | No automated download | These sources may require manual browsing, login, authorization, payment, robots.txt compliance, or human verification. |
@@ -70,16 +74,35 @@ On Windows, you can also run:
 start_paperhunter.bat
 ```
 
+## Model Configuration
+
+PaperHunter can translate abstracts and downloaded full text through a model endpoint that you configure locally in the UI.
+
+Supported presets include:
+
+- APIXIN GPT-compatible endpoints
+- DeepSeek Chat Completions
+- Anthropic Messages
+- custom OpenAI-compatible Responses or Chat Completions endpoints
+
+Model settings are saved to `data/settings.json`, which is ignored by Git. The public status API returns only a masked key, and workspace backups intentionally remove the API key before writing `data/settings.json` into the backup ZIP.
+
+Translation requests send the selected abstract or full-text chunk to the configured model provider. PaperHunter does not query your account balance and does not send papers for translation unless you trigger a translation action.
+
 ## Typical Workflow
 
 1. Enter a research keyword or phrase.
 2. Select research intent, field, year range, source group, and per-source limit.
 3. Run the search and review metadata, venues, years, and PDF availability.
-4. Save useful papers to the local inbox, or ignore papers you do not want to see again.
-5. Export saved favorites as BibTeX or a Markdown reading list for citation management and later translation.
-6. Refresh favorite metadata when older saved items show truncated abstracts.
-7. Download selected open-access PDFs or batch-download downloadable results.
-8. Use external gateway buttons when a source needs browser-side login or institution access.
+4. Save useful papers to the local inbox, ignore papers you do not want to see again, and optionally add reading status, tags, or notes.
+5. Configure a model endpoint if you want abstract or full-text translation.
+6. Translate one abstract, batch-translate favorite abstracts, or retranslate stale summaries after metadata changes.
+7. Export saved favorites as BibTeX, a Markdown reading list, or a bilingual English/Chinese summary file.
+8. Download selected open-access PDFs or batch-download downloadable results.
+9. Translate downloaded full text into bilingual Markdown, monitor chunk progress, and open the output folder when the task is complete.
+10. Refresh favorite metadata when older saved items show truncated abstracts.
+11. Export a workspace backup before moving machines or cleaning local runtime data.
+12. Use external gateway buttons when a source needs browser-side login or institution access.
 
 ## Project Structure
 
@@ -88,8 +111,10 @@ app.py                    Python HTTP server, source adapters, filters, download
 web/index.html            Browser UI structure
 web/styles.css            UI styling
 web/app.js                Frontend state, filters, API calls
-data/                     Local inbox state, ignored by Git
+data/                     Local library, model settings, and task state, ignored by Git
+data/fulltext_tasks/      Resumable full-text translation task state, ignored by Git
 downloaded_papers/        Local PDF output directory, ignored by Git
+translated_papers/        Bilingual Markdown full-text translation output, ignored by Git
 docs/assets/              README and documentation images
 tests/                    Backend regression tests
 .github/workflows/ci.yml  Syntax checks for Python and JavaScript
@@ -102,6 +127,24 @@ python -m py_compile app.py
 python -m unittest discover -s tests
 node --check web/app.js
 ```
+
+## Local Data and Backups
+
+PaperHunter is local-first, but some actions intentionally call external services:
+
+- search requests call the selected public paper sources
+- abstract and full-text translation requests call the model endpoint you configured
+- external gateway buttons open third-party websites in your browser
+
+Local runtime data is ignored by Git:
+
+- `data/library.json` stores favorites, ignored papers, metadata, tags, notes, translations, and recent searches
+- `data/settings.json` stores local model settings and may contain an API key
+- `data/fulltext_tasks/` stores resumable translation task progress
+- `downloaded_papers/` stores downloaded PDFs
+- `translated_papers/` stores bilingual Markdown full-text translations
+
+The workspace backup feature exports local library data, downloaded PDFs, translated papers, and full-text task state. It includes model settings without the API key, so API credentials must be re-entered after restoring a backup.
 
 ## Compliance
 
