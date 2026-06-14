@@ -32,6 +32,25 @@ SAMPLE_PAPER = {
 
 
 class LibraryTests(unittest.TestCase):
+    def assertSamePath(self, expected: Path | str, actual: Path | str) -> None:
+        self.assertEqual(Path(expected).resolve(), Path(actual).resolve())
+
+    @contextmanager
+    def temporary_settings_path(self, root: Path):
+        settings_path = root / "state" / "settings.json"
+        with patch.object(app, "SETTINGS_PATH", settings_path):
+            yield settings_path
+
+    def write_bridge_fixture_xpi(self, xpi_path: Path, *, version: str | None = None, bootstrap: str | None = None) -> None:
+        manifest = json.loads(app.ZOTERO_BRIDGE_MANIFEST_PATH.read_text(encoding="utf-8"))
+        manifest["version"] = version or app.ZOTERO_BRIDGE_VERSION
+        source_bootstrap = app.ZOTERO_BRIDGE_BOOTSTRAP_PATH.read_text(encoding="utf-8")
+        token = app.zotero_bridge_token()
+        packaged_bootstrap = bootstrap if bootstrap is not None else source_bootstrap.replace(app.ZOTERO_BRIDGE_TOKEN_PLACEHOLDER, token)
+        with zipfile.ZipFile(xpi_path, "w") as zip_file:
+            zip_file.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
+            zip_file.writestr("bootstrap.js", packaged_bootstrap)
+
     class HandlerStub(app.PaperHunterHandler):
         def __init__(self, path: str):
             self.path = path
@@ -107,13 +126,13 @@ class LibraryTests(unittest.TestCase):
             )
             paths = json.loads(result.stdout)
 
-        self.assertEqual(str(root / "state" / "library.json"), paths["library"])
-        self.assertEqual(str(root / "state" / "settings.json"), paths["settings"])
-        self.assertEqual(str(root / "tasks" / "fulltext"), paths["tasks"])
-        self.assertEqual(str(root / "papers"), paths["download"])
-        self.assertEqual(str(root / "translated"), paths["translated"])
-        self.assertEqual(str(root / "zotero" / "zotero.sqlite"), paths["zoteroDb"])
-        self.assertEqual(str(root / "zotero" / "storage"), paths["zoteroStorage"])
+        self.assertSamePath(root / "state" / "library.json", paths["library"])
+        self.assertSamePath(root / "state" / "settings.json", paths["settings"])
+        self.assertSamePath(root / "tasks" / "fulltext", paths["tasks"])
+        self.assertSamePath(root / "papers", paths["download"])
+        self.assertSamePath(root / "translated", paths["translated"])
+        self.assertSamePath(root / "zotero" / "zotero.sqlite", paths["zoteroDb"])
+        self.assertSamePath(root / "zotero" / "storage", paths["zoteroStorage"])
         self.assertEqual(8123, paths["port"])
 
     def test_http_get_rejects_api_prefix_shadow_route(self):
@@ -474,7 +493,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual("Imported Zotero Paper", paper["title"])
         self.assertEqual("Grace Hopper", paper["authors"])
         self.assertEqual("10.1234/zotero.paper", paper["doi"])
-        self.assertEqual(str(pdf_path), paper["localPdfPath"])
+        self.assertSamePath(pdf_path, paper["localPdfPath"])
         self.assertTrue(paper["downloadable"])
         self.assertTrue(paper["isDownloaded"])
         self.assertEqual("ITEMKEY", paper["zotero"]["itemKey"])
@@ -511,7 +530,7 @@ class LibraryTests(unittest.TestCase):
 
         self.assertEqual(1, len(papers))
         paper = papers[0]
-        self.assertEqual(str(linked_pdf), paper["localPdfPath"])
+        self.assertSamePath(linked_pdf, paper["localPdfPath"])
         self.assertTrue(paper["downloadable"])
         self.assertTrue(paper["zotero"]["attachments"][0]["isPdf"])
 
@@ -551,11 +570,11 @@ class LibraryTests(unittest.TestCase):
                 papers = app.read_zotero_papers(limit=10)
 
         paper = papers[0]
-        self.assertEqual(str(pdf_path), paper["localPdfPath"])
+        self.assertSamePath(pdf_path, paper["localPdfPath"])
         attachments = paper["zotero"]["attachments"]
         self.assertEqual(2, len(attachments))
         markdown = next(attachment for attachment in attachments if attachment["contentType"] == "text/markdown")
-        self.assertEqual(str(markdown_path), markdown["path"])
+        self.assertSamePath(markdown_path, markdown["path"])
         self.assertTrue(markdown["managedByPaperHunter"])
         self.assertFalse(markdown["isPdf"])
         self.assertEqual("PaperHunter full-text translation", markdown["title"])
@@ -583,7 +602,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(1, response["withPdf"])
         key = next(iter(library["favorites"]))
         self.assertEqual("user_library", library["favorites"][key]["paper"]["access"])
-        self.assertEqual(str(pdf_path), library["downloads"][key]["path"])
+        self.assertSamePath(pdf_path, library["downloads"][key]["path"])
         self.assertEqual("zotero", library["downloads"][key]["source"])
 
     def test_import_zotero_library_links_existing_paper_by_title(self):
@@ -713,7 +732,7 @@ class LibraryTests(unittest.TestCase):
         self.assertIn("中文摘要。", payload["noteHtml"])
         self.assertIn("paperhunter:abstract-translated", payload["tags"])
         self.assertIn("paperhunter:fulltext-translated", payload["tags"])
-        self.assertEqual([str(output)], payload["attachments"])
+        self.assertEqual([output.resolve()], [Path(path).resolve() for path in payload["attachments"]])
 
     def test_zotero_sync_payload_deduplicates_translated_attachment_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -748,7 +767,7 @@ class LibraryTests(unittest.TestCase):
             ):
                 payload = app.zotero_sync_payload(paper)
 
-        self.assertEqual([str(output)], payload["attachments"])
+        self.assertEqual([output.resolve()], [Path(path).resolve() for path in payload["attachments"]])
 
     def test_zotero_sync_payload_rejects_conflicting_item_keys(self):
         paper = app.paper_snapshot({
@@ -3143,30 +3162,24 @@ class LibraryTests(unittest.TestCase):
 
     def test_read_zotero_bridge_xpi_returns_package_bytes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "paperhunter-zotero-bridge.xpi"
-            with zipfile.ZipFile(xpi_path, "w") as zip_file:
-                zip_file.writestr("manifest.json", json.dumps({"version": app.ZOTERO_BRIDGE_VERSION}))
-                zip_file.writestr(
-                    "bootstrap.js",
-                    f'var PaperHunterBridge = {{ version: "{app.ZOTERO_BRIDGE_VERSION}", protocolVersion: 1 }}; function startup() {{}}',
-                )
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                content, filename = app.read_zotero_bridge_xpi()
+            root = Path(tmpdir)
+            xpi_path = root / "paperhunter-zotero-bridge.xpi"
+            with self.temporary_settings_path(root):
+                self.write_bridge_fixture_xpi(xpi_path)
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    content, filename = app.read_zotero_bridge_xpi()
 
         self.assertTrue(content.startswith(b"PK\x03\x04"))
         self.assertEqual("paperhunter-zotero-bridge.xpi", filename)
 
     def test_zotero_bridge_package_status_reports_valid_package(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "paperhunter-zotero-bridge.xpi"
-            with zipfile.ZipFile(xpi_path, "w") as zip_file:
-                zip_file.writestr("manifest.json", json.dumps({"version": app.ZOTERO_BRIDGE_VERSION}))
-                zip_file.writestr(
-                    "bootstrap.js",
-                    f'var PaperHunterBridge = {{ version: "{app.ZOTERO_BRIDGE_VERSION}", protocolVersion: 1 }}; function startup() {{}}',
-                )
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                status = app.zotero_bridge_package_status()
+            root = Path(tmpdir)
+            xpi_path = root / "paperhunter-zotero-bridge.xpi"
+            with self.temporary_settings_path(root):
+                self.write_bridge_fixture_xpi(xpi_path)
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    status = app.zotero_bridge_package_status()
 
         self.assertTrue(status["available"])
         self.assertTrue(status["valid"])
@@ -3177,8 +3190,10 @@ class LibraryTests(unittest.TestCase):
 
     def test_zotero_bridge_package_status_builds_missing_package_from_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", Path(tmpdir) / "missing.xpi"):
-                status = app.zotero_bridge_package_status()
+            root = Path(tmpdir)
+            with self.temporary_settings_path(root):
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", root / "missing.xpi"):
+                    status = app.zotero_bridge_package_status()
 
         self.assertTrue(status["available"])
         self.assertTrue(status["valid"])
@@ -3188,12 +3203,14 @@ class LibraryTests(unittest.TestCase):
 
     def test_zotero_bridge_package_status_rebuilds_invalid_package(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "paperhunter-zotero-bridge.xpi"
-            with zipfile.ZipFile(xpi_path, "w") as zip_file:
-                zip_file.writestr("manifest.json", json.dumps({"version": "0.1.0"}))
-                zip_file.writestr("bootstrap.js", 'var PaperHunterBridge = { version: "0.1.0", protocolVersion: 1 };')
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                status = app.zotero_bridge_package_status()
+            root = Path(tmpdir)
+            xpi_path = root / "paperhunter-zotero-bridge.xpi"
+            with self.temporary_settings_path(root):
+                with zipfile.ZipFile(xpi_path, "w") as zip_file:
+                    zip_file.writestr("manifest.json", json.dumps({"version": "0.1.0"}))
+                    zip_file.writestr("bootstrap.js", 'var PaperHunterBridge = { version: "0.1.0", protocolVersion: 1 };')
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    status = app.zotero_bridge_package_status()
 
         self.assertTrue(status["available"])
         self.assertTrue(status["valid"])
@@ -3202,20 +3219,24 @@ class LibraryTests(unittest.TestCase):
 
     def test_read_zotero_bridge_xpi_builds_missing_package_from_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "missing.xpi"
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                content, filename = app.read_zotero_bridge_xpi()
+            root = Path(tmpdir)
+            xpi_path = root / "missing.xpi"
+            with self.temporary_settings_path(root):
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    content, filename = app.read_zotero_bridge_xpi()
 
         self.assertEqual("missing.xpi", filename)
         self.assertTrue(content.startswith(b"PK\x03\x04"))
 
     def test_read_zotero_bridge_xpi_rebuilds_incomplete_package(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "paperhunter-zotero-bridge.xpi"
-            with zipfile.ZipFile(xpi_path, "w") as zip_file:
-                zip_file.writestr("manifest.json", "{}")
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                content, _ = app.read_zotero_bridge_xpi()
+            root = Path(tmpdir)
+            xpi_path = root / "paperhunter-zotero-bridge.xpi"
+            with self.temporary_settings_path(root):
+                with zipfile.ZipFile(xpi_path, "w") as zip_file:
+                    zip_file.writestr("manifest.json", "{}")
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    content, _ = app.read_zotero_bridge_xpi()
 
         with zipfile.ZipFile(io.BytesIO(content), "r") as zip_file:
             manifest = json.loads(zip_file.read("manifest.json").decode("utf-8"))
@@ -3223,12 +3244,14 @@ class LibraryTests(unittest.TestCase):
 
     def test_read_zotero_bridge_xpi_rebuilds_stale_package_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "paperhunter-zotero-bridge.xpi"
-            with zipfile.ZipFile(xpi_path, "w") as zip_file:
-                zip_file.writestr("manifest.json", json.dumps({"version": "0.1.0"}))
-                zip_file.writestr("bootstrap.js", 'var PaperHunterBridge = { version: "0.1.0", protocolVersion: 1 };')
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                content, _ = app.read_zotero_bridge_xpi()
+            root = Path(tmpdir)
+            xpi_path = root / "paperhunter-zotero-bridge.xpi"
+            with self.temporary_settings_path(root):
+                with zipfile.ZipFile(xpi_path, "w") as zip_file:
+                    zip_file.writestr("manifest.json", json.dumps({"version": "0.1.0"}))
+                    zip_file.writestr("bootstrap.js", 'var PaperHunterBridge = { version: "0.1.0", protocolVersion: 1 };')
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    content, _ = app.read_zotero_bridge_xpi()
 
         with zipfile.ZipFile(io.BytesIO(content), "r") as zip_file:
             manifest = json.loads(zip_file.read("manifest.json").decode("utf-8"))
@@ -3236,30 +3259,18 @@ class LibraryTests(unittest.TestCase):
 
     def test_read_zotero_bridge_xpi_rebuilds_package_that_differs_from_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            xpi_path = Path(tmpdir) / "paperhunter-zotero-bridge.xpi"
-            with zipfile.ZipFile(xpi_path, "w") as zip_file:
-                zip_file.writestr(
-                    "manifest.json",
-                    json.dumps({
-                        "manifest_version": 2,
-                        "name": "PaperHunter Zotero Bridge",
-                        "version": app.ZOTERO_BRIDGE_VERSION,
-                        "description": "stale",
-                        "applications": {"zotero": {"id": "paperhunter-bridge@local"}},
-                    }),
+            root = Path(tmpdir)
+            xpi_path = root / "paperhunter-zotero-bridge.xpi"
+            with self.temporary_settings_path(root):
+                source_bootstrap = app.ZOTERO_BRIDGE_BOOTSTRAP_PATH.read_text(encoding="utf-8")
+                expected_bootstrap = source_bootstrap.replace(app.ZOTERO_BRIDGE_TOKEN_PLACEHOLDER, app.zotero_bridge_token())
+                stale_bootstrap = expected_bootstrap.replace(
+                    "PaperHunter Zotero Bridge started",
+                    "PaperHunter Zotero Bridge stale",
                 )
-                zip_file.writestr(
-                    "bootstrap.js",
-                    (
-                        f'var PaperHunterBridge = {{ version: "{app.ZOTERO_BRIDGE_VERSION}", '
-                        'protocolVersion: 1, preserveUserContent: true, managedNoteAttribute: "", '
-                        'isManagedNote() {}, assertLocalRequest() {}, allowedAttachmentRoots: [], '
-                        'message: "PaperHunter Bridge only links translated Markdown attachments; '
-                        'only links attachments inside PaperHunter translated output" };'
-                    ),
-                )
-            with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
-                content, _ = app.read_zotero_bridge_xpi()
+                self.write_bridge_fixture_xpi(xpi_path, bootstrap=stale_bootstrap)
+                with patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", xpi_path):
+                    content, _ = app.read_zotero_bridge_xpi()
 
         with zipfile.ZipFile(io.BytesIO(content), "r") as zip_file:
             manifest = json.loads(zip_file.read("manifest.json").decode("utf-8"))
@@ -3270,17 +3281,16 @@ class LibraryTests(unittest.TestCase):
         )
         source_bootstrap = app.ZOTERO_BRIDGE_BOOTSTRAP_PATH.read_text(encoding="utf-8")
         self.assertNotIn(app.ZOTERO_BRIDGE_TOKEN_PLACEHOLDER, bootstrap)
-        self.assertEqual(
-            source_bootstrap.replace(app.ZOTERO_BRIDGE_TOKEN_PLACEHOLDER, app.zotero_bridge_token()),
-            bootstrap,
-        )
+        self.assertEqual(expected_bootstrap, bootstrap)
 
     def test_read_zotero_bridge_xpi_rejects_missing_source(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            missing_manifest = Path(tmpdir) / "manifest.json"
-            missing_bootstrap = Path(tmpdir) / "bootstrap.js"
+            root = Path(tmpdir)
+            missing_manifest = root / "manifest.json"
+            missing_bootstrap = root / "bootstrap.js"
             with (
-                patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", Path(tmpdir) / "missing.xpi"),
+                self.temporary_settings_path(root),
+                patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", root / "missing.xpi"),
                 patch.object(app, "ZOTERO_BRIDGE_MANIFEST_PATH", missing_manifest),
                 patch.object(app, "ZOTERO_BRIDGE_BOOTSTRAP_PATH", missing_bootstrap),
             ):
@@ -3288,11 +3298,19 @@ class LibraryTests(unittest.TestCase):
                     app.read_zotero_bridge_xpi()
 
     def test_repository_zotero_bridge_package_matches_current_version(self):
-        content, _ = app.read_zotero_bridge_xpi()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            with (
+                self.temporary_settings_path(root),
+                patch.object(app, "ZOTERO_BRIDGE_XPI_PATH", root / "paperhunter-zotero-bridge.xpi"),
+            ):
+                content, filename = app.read_zotero_bridge_xpi()
+
         with zipfile.ZipFile(io.BytesIO(content), "r") as zip_file:
             manifest = json.loads(zip_file.read("manifest.json").decode("utf-8"))
             bootstrap = zip_file.read("bootstrap.js").decode("utf-8")
 
+        self.assertEqual("paperhunter-zotero-bridge.xpi", filename)
         self.assertEqual(app.ZOTERO_BRIDGE_VERSION, manifest["version"])
         self.assertIn("protocolVersion: 1", bootstrap)
         self.assertIn("preserveUserContent", bootstrap)

@@ -2979,6 +2979,7 @@ def load_library() -> dict:
 
 def save_library(library: dict) -> None:
     with LIBRARY_LOCK:
+        LIBRARY_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = LIBRARY_PATH.with_suffix(".tmp")
         with tmp_path.open("w", encoding="utf-8") as file:
             json.dump(library, file, ensure_ascii=False, indent=2)
@@ -3198,6 +3199,7 @@ def load_settings() -> dict:
 
 
 def save_settings(settings: dict) -> None:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = SETTINGS_PATH.with_suffix(".tmp")
     with tmp_path.open("w", encoding="utf-8") as file:
         json.dump(settings, file, ensure_ascii=False, indent=2)
