@@ -29,7 +29,8 @@ PaperHunter 用来帮助研究人员同时检索多个开放论文来源，通�
 - 支持“本地收件箱”：收藏、忽略、阅读状态、标签、备注、最近搜索、下载状态和全文翻译任务状态会保存到 `data/library.json`。
 - 支持模型设置面板，可配置 OpenAI 兼容 Responses/Chat Completions 接口、DeepSeek、Anthropic 和自定义提供商。
 - 支持单篇摘要翻译和收藏摘要批量翻译；当来源摘要变化时，会标记已有译文可能过期。
-- 支持把收藏或单篇论文导出为 BibTeX、Markdown 阅读清单，以及中英对照摘要 Markdown。
+- 支持 Zotero 双向联动：把检索结果保存到 Zotero，从本机 Zotero 导入条目和 PDF 附件，并可通过 PaperHunter Zotero Bridge 把摘要译文、全文译文和处理标签同步回 Zotero。
+- 支持导出 BibTeX、适合 Zotero/EndNote 导入的 RIS、Markdown 阅读清单，以及中英对照摘要 Markdown。
 - 支持对已下载 PDF 进行全文翻译：分片任务可续跑、可查看进度、输出中英对照 Markdown，并可打开译文所在文件夹。
 - 支持刷新收藏论文元数据，用来更新旧收藏并尽量补回完整摘要；ChinaRxiv feed 摘要被截断时会尝试从详情页补全。
 - 支持工作区备份与导入，可备份本地资料库、已下载 PDF、全文译文和翻译任务；备份会移除 API Key。
@@ -89,6 +90,56 @@ PaperHunter 可以通过你在界面中配置的模型接口翻译摘要和已�
 
 翻译请求会把选中的摘要或全文分片发送到你配置的模型提供商。PaperHunter 不查询账户余额，也不会在你没有触发翻译操作时发送论文内容。
 
+如果 OpenAI 兼容的 Responses 端点返回 `completed` 但没有可见文本，PaperHunter 会在可以推断出对应路径时自动改用同一网关的 Chat Completions 路由重试。这样可以兼容同时支持两种 API、但只在 Chat Completions 响应中暴露文本的中转服务。
+
+## 阶段 8 验收说明
+
+阶段 8 的端到端验收路径是：导入用户可见的 ScienceDirect 或 Web of Science alert，从 Alert inbox 采纳完整摘要，翻译摘要，把已下载 PDF 翻译成中英对照 Markdown，生成 Research Radar 智能摘要，并确认 Zotero 绑定状态仍然保留。
+
+验收时应使用临时的 `LIBRARY_PATH`、`SETTINGS_PATH`、`FULLTEXT_TASK_DIR`、`DOWNLOAD_DIR` 和 `TRANSLATED_DIR`。可以从 `downloaded_papers/` 选取真实 PDF 做验证，但测试不得清空或覆盖真实 PaperHunter 资料库、已下载论文、译文目录或 Zotero 数据。
+
+这里的权限边界是有意设计的：PaperHunter 不绕过付费墙，也不自动化受限出版方访问；但如果用户已经通过合法路径拥有入口，也不能因为开放元数据缺失、滞后或新期刊更新不及时，就剥夺用户把 alert 文本、本地 Zotero 条目和本地 PDF 纳入工作流的能力。
+
+## 阶段 9 运行健康
+
+“运行健康”面板是阶段 8 流程的只读排障中心。它会汇总模型配置、最近一次用户显式触发的模型连接测试、可续跑的全文翻译任务、Zotero 绑定状态和验收检查。
+
+模型卡片会把最近一次连接测试记录保存到 `data/settings.json`：测试状态、测试时间、接口类型、Responses 空输出时实际 fallback 到的接口类型、最终 URL、返回文本长度、usage 和规范化错误信息。这个记录只会在你点击模型测试或执行本来就会调用模型的翻译路径时更新。
+
+全文卡片会列出最近的分片翻译任务。失败或部分完成的任务如果仍能在本地库中找到对应论文，可以从面板继续；已完成任务可以直接打开译文 Markdown 所在位置。
+
+Zotero 卡片会展示收藏论文的 dry-run 计划：canonical `itemKey`、是否已有摘要/全文译文、将管理多少个 `paperhunter:*` 标签，以及将链接多少个译文 Markdown 附件。从这个面板打开的单篇 dry-run 会传入 `persistReview: false`，因此不会写 Zotero、不会创建 audit 事件，也不会把重复候选或需确认状态持久化到资料库。真正回写 Zotero 仍然需要用户在正式同步入口明确触发。
+
+刷新诊断不会调用模型、不会读取 Zotero 候选记录、不会写 Zotero audit，也不会清空 PA/ZO、已下载论文、全文译文或 Zotero 数据。
+
+## 引用管理工具
+
+PaperHunter 可以把当前检索结果、收藏列表或单篇论文通过 Zotero 本机 Connector 接口直接保存到已经打开的 Zotero 桌面端，也可以导出为 RIS，用于导入 Zotero、EndNote 和其他引用管理工具。保存或导出的题录会尽量包含标题、作者、年份/日期、期刊或会议、摘要、可获取的 DOI、来源页面、公开 PDF 链接、关键词和备注。
+
+如果本机已安装 Zotero，PaperHunter 还可以从 `~/Zotero/zotero.sqlite` 的只读快照导入 Zotero 条目、标签、分组信息和 PDF 附件路径。导入的 Zotero PDF 会作为用户已有合法馆藏处理，不要求它是开放访问 PDF，也不会尝试绕过访问控制去下载受限全文。
+
+保存到 Zotero 或从 Zotero 导入后，PaperHunter 会按 DOI、来源 URL、来源 ID 和标题/年份自动寻找同一篇文献，并把 Zotero `itemKey` 回绑到本地论文记录。这样一篇论文不会因为先在 PaperHunter 收藏、再保存到 Zotero 而断开后续同步链路。
+
+要把 PaperHunter 中的摘要译文、全文翻译结果和 `paperhunter:*` 状态标签同步回 Zotero，需要从 PaperHunter 的 Zotero 联动面板点击“下载 Bridge 插件”取得本地 XPI 并安装。这个 XPI 会在需要时从仓库跟踪的 `zotero-bridge/manifest.json` 和 `zotero-bridge/bootstrap.js` 源码重新构建，并且会用本地 token 绑定到当前 PaperHunter 实例。安装后 Zotero 会提供本机 `/paperhunter/ping` 和 `/paperhunter/sync` 端点，PaperHunter 会在对应 Zotero 条目下创建或更新唯一一条由 PaperHunter 管理的 “PaperHunter 同步结果” note，只写入 `paperhunter:*` 状态标签，并且只把 PaperHunter `translated_papers/` 输出目录下的全文译文 Markdown 作为本地链接附件挂回 Zotero。Bridge 不会删除、覆盖或移动 Zotero 原始条目、PDF、用户笔记、用户标签或分组。
+
+推荐用户流程是：先安装并打开 Zotero，再启动 PaperHunter；需要时把 Zotero 中已有的条目和 PDF 附件路径导入 PaperHunter；在 PaperHunter 中做摘要翻译、全文翻译或总结；如果希望这些处理结果回到 Zotero，再安装/启用可选的 PaperHunter Zotero Bridge。Zotero 仍然是原始文献库的管理中心。
+
+对于非开放访问论文，PaperHunter 会把题录和 PDF 分开处理：可以保存元数据、DOI 和外部访问入口，但不会绕过付费墙、登录、验证码、机构访问控制或出版方限制。如果你通过自己的合法访问路径获得 PDF，仍然可以把本地文件纳入 PaperHunter 的管理和翻译工作流。
+
+完整的 Alert 到 Zotero 操作流程，包括 Alert 导入、认领/锁定、摘要翻译、Zotero 保存/导入、Bridge 安装、dry-run 预览和真实回写，见中文说明：[Zotero 与 Alert 工作流指南](docs/ZOTERO_ALERT_WORKFLOW.zh-CN.md)。
+
+### 安装 PaperHunter Zotero Bridge
+
+Bridge 是 Zotero 的本地插件，不修改 Zotero 源码。用户正常安装 Zotero，启动 PaperHunter，需要回写译文时再安装这个可选插件即可。
+
+1. 在 PaperHunter 的 Zotero 联动面板点击“下载 Bridge 插件”。如果本地 XPI 缺失或版本过期，PaperHunter 会从已跟踪的 Bridge 源码重新构建。
+2. 在 Zotero 中打开插件管理器。
+3. 选择“从文件安装插件”，选中刚下载的 `paperhunter-zotero-bridge.xpi`。
+4. 重启 Zotero。
+5. 回到 PaperHunter 刷新页面或重新启动 PaperHunter，面板应显示 `Bridge 0.2.2 已可用`、配对 token 已验证，并显示“回写可用”。
+
+如果面板仍显示“回写需 Bridge”，先确认 Zotero 正在运行，再重新安装当前页面下载的 XPI 并重启 Zotero。如果显示版本、协议或配对 token 不兼容，请从当前 PaperHunter 页面重新下载 XPI 覆盖安装，确保 XPI 内嵌的配对 token 与这个工作区一致。换机器或恢复设置后会生成新的本地配对 token，因此需要把新下载的 XPI 重新安装到 Zotero。Bridge 只接受带匹配配对 token 的 PaperHunter 本机请求，只更新 PaperHunter 管理的同步 note、`paperhunter:*` 标签和译文 Markdown 附件；用户原来的 Zotero 条目、PDF、标签、笔记和分组会保留。
+
 ## 使用流程
 
 1. 输入研究关键词或短语。
@@ -97,12 +148,14 @@ PaperHunter 可以通过你在界面中配置的模型接口翻译摘要和已�
 4. 把有用论文加入本地收件箱，忽略不想再看到的论文，并可补充阅读状态、标签和备注。
 5. 如需摘要或全文翻译，先配置模型接口。
 6. 翻译单篇摘要、批量翻译收藏摘要，或者在元数据更新后重译可能过期的摘要。
-7. 将收藏论文导出为 BibTeX、Markdown 阅读清单或中英对照摘要文件。
+7. 将题录保存到 Zotero，或从 Zotero 导入已有馆藏和 PDF 附件。
 8. 下载选中的开放访问 PDF，或批量下载可下载结果。
 9. 对已下载 PDF 执行全文翻译，查看分片进度；任务完成后可打开译文所在文件夹。
-10. 如果旧收藏显示摘要可能被截断，可以刷新收藏元数据来尽量补回完整摘要。
-11. 在迁移机器或清理本地运行数据前，导出工作区备份。
-12. 如果来源需要登录或机构权限，使用外部入口在浏览器中继续访问。
+10. 如需回写 Zotero，启用 PaperHunter Zotero Bridge 后同步摘要译文、全文译文附件和状态标签。
+11. 把收藏论文导出为 BibTeX、适合 Zotero/EndNote 导入的 RIS、Markdown 阅读清单或中英对照摘要文件。
+12. 如果旧收藏显示摘要可能被截断，可以刷新收藏元数据来尽量补回完整摘要。
+13. 在迁移机器或清理本地运行数据前，导出工作区备份。
+14. 如果来源需要登录或机构权限，使用外部入口在浏览器中继续访问。
 
 ## 项目结构
 
@@ -115,6 +168,7 @@ data/                     本地资料库、模型设置和任务状态目录，
 data/fulltext_tasks/      可续跑的全文翻译任务状态，已被 Git 忽略
 downloaded_papers/        本地 PDF 输出目录，已被 Git 忽略
 translated_papers/        全文翻译输出的中英对照 Markdown，已被 Git 忽略
+zotero-bridge/            Zotero 本地插件源码；XPI 会在需要时从这些文件重新构建
 docs/assets/              README 和文档图片
 tests/                    后端回归测试
 .github/workflows/ci.yml  Python 和 JavaScript 语法检查
@@ -143,6 +197,7 @@ PaperHunter 采用本地优先设计，但部分操作会按你的选择访问�
 - `data/fulltext_tasks/` 保存可续跑的全文翻译任务进度
 - `downloaded_papers/` 保存下载的 PDF
 - `translated_papers/` 保存全文翻译生成的中英对照 Markdown
+- `output/`、`test-results/`、`tmp-*.png` 和 `zotero-bridge/*.xpi` 是本地验证或构建产物
 
 工作区备份会导出本地资料库、已下载 PDF、全文译文和全文翻译任务状态。备份中会包含不带 API Key 的模型设置，因此恢复备份后需要重新填写 API Key。
 

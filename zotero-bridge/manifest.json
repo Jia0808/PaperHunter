@@ -1,0 +1,13 @@
+{
+  "manifest_version": 2,
+  "name": "PaperHunter Zotero Bridge",
+  "version": "0.2.2",
+  "description": "Local Zotero bridge for syncing PaperHunter notes, tags, and translated attachments.",
+  "applications": {
+    "zotero": {
+      "id": "paperhunter-bridge@local",
+      "strict_min_version": "7.0",
+      "strict_max_version": "9.99.99"
+    }
+  }
+}

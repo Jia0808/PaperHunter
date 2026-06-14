@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PaperHunter</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="stylesheet" href="/styles.css?v=20260530-bilingual-label" />
+    <link rel="stylesheet" href="/styles.css?v=20260605-alert-inbox" />
   </head>
   <body>
     <div class="app-shell">
@@ -225,6 +225,17 @@
               <span>API Key <small id="modelKeyHint">未保存</small></span>
               <input id="modelApiKeyInput" type="password" placeholder="留空则保留已保存密钥" autocomplete="new-password" />
             </label>
+            <label class="field">
+              <span>Zotero 私有 PDF 翻译策略</span>
+              <select id="privatePdfModeSelect">
+                <option value="confirm">翻译前确认，可使用当前模型</option>
+                <option value="local_only">仅允许本地/自托管模型</option>
+              </select>
+            </label>
+            <label class="checkbox-row model-privacy-toggle">
+              <input id="selfHostedModelInput" type="checkbox" />
+              <span>我确认当前模型端点是本地或自托管服务</span>
+            </label>
             <div class="endpoint-preview">
               <span>最终请求地址</span>
               <strong id="modelFinalUrl">未配置</strong>
@@ -233,8 +244,41 @@
               <button id="testModelButton" class="secondary-action compact-action" type="button">测试连接</button>
               <button id="saveModelButton" class="secondary-action compact-action" type="button">保存设置</button>
             </div>
+            <p id="modelPrivacyNote" class="model-privacy-note">Zotero 本地资料库 PDF 默认需要翻译前确认；严格模式只允许本地或自托管模型。</p>
             <p id="modelTestNote">测试会发送一条极短请求，可能消耗少量 token。PaperHunter 不查询余额。</p>
           </form>
+        </section>
+
+        <section class="diagnostics-panel" aria-label="运行健康">
+          <div class="library-heading">
+            <div>
+              <strong>运行健康</strong>
+              <span id="diagnosticsStatusNote">等待诊断刷新</span>
+            </div>
+            <div class="diagnostics-actions">
+              <button id="refreshDiagnosticsButton" class="text-action" type="button">刷新</button>
+              <button id="copyDiagnosticsButton" class="text-action" type="button">复制诊断</button>
+              <button id="showTaskCenterButton" class="text-action" type="button">任务中心</button>
+            </div>
+          </div>
+          <div id="diagnosticsSummary" class="diagnostics-summary">
+            <span class="history-empty">暂无诊断结果</span>
+          </div>
+          <div class="diagnostics-grid">
+            <div id="diagnosticsModel" class="diagnostics-card">
+              <span class="history-empty">模型状态待刷新</span>
+            </div>
+            <div id="diagnosticsFulltext" class="diagnostics-card">
+              <span class="history-empty">全文任务待刷新</span>
+            </div>
+            <div id="diagnosticsZotero" class="diagnostics-card">
+              <span class="history-empty">Zotero dry-run 待刷新</span>
+            </div>
+          </div>
+          <div id="diagnosticsAcceptance" class="diagnostics-check-list">
+            <span class="history-empty">验收检查待刷新</span>
+          </div>
+          <p id="diagnosticsPolicy" class="zotero-install-note">诊断为只读检查。</p>
         </section>
 
         <section class="backup-panel" aria-label="备份与迁移">
@@ -250,6 +294,111 @@
               导入备份
               <input id="importBackupInput" type="file" accept=".zip,application/zip" />
             </label>
+          </div>
+        </section>
+
+        <section class="zotero-panel" aria-label="Zotero 联动">
+          <div class="library-heading">
+            <div>
+              <strong>Zotero 联动</strong>
+              <span id="zoteroStatusNote">正在检测 Zotero...</span>
+            </div>
+          </div>
+          <div class="zotero-actions">
+            <button id="importZoteroButton" class="secondary-action compact-action" type="button" disabled>从 Zotero 导入</button>
+            <button id="importZoteroPdfButton" class="secondary-action compact-action" type="button" disabled>只导入有 PDF</button>
+            <button id="syncFavoritesZoteroButton" class="secondary-action compact-action" type="button" disabled>同步译文回 Zotero</button>
+            <button id="manageZoteroBindingsButton" class="secondary-action compact-action" type="button">管理绑定</button>
+            <button id="showZoteroAuditButton" class="secondary-action compact-action" type="button">操作历史</button>
+            <button id="showZoteroBridgeHelpButton" class="secondary-action compact-action" type="button">Bridge 排障</button>
+            <a id="downloadZoteroBridgeLink" class="secondary-action compact-action" href="/api/zotero/bridge-xpi" download="paperhunter-zotero-bridge.xpi">下载 Bridge 插件</a>
+          </div>
+          <div id="zoteroLinkSummary" class="zotero-link-summary">已关联 0 篇收藏</div>
+          <p id="zoteroBridgeNote">导入读取本机 Zotero 资料库；同步译文需要启用 PaperHunter Zotero Bridge。</p>
+          <p id="zoteroInstallNote" class="zotero-install-note">下载 XPI，在 Zotero 插件管理器中从文件安装，重启 Zotero 后刷新 PaperHunter。</p>
+          <p id="zoteroAuditSummary" class="zotero-install-note">最近一次回写目标会在同步后显示。</p>
+        </section>
+
+        <section class="subscription-panel" aria-label="Subscription alert sources">
+          <div class="library-heading">
+            <div>
+              <strong>权限来源</strong>
+              <span id="subscriptionStatusNote">正在加载 Alert 来源...</span>
+            </div>
+          </div>
+          <div class="subscription-actions">
+            <button id="importSubscriptionAlertButton" class="secondary-action compact-action" type="button">导入 Alert</button>
+            <button id="addSubscriptionSourceButton" class="secondary-action compact-action" type="button">添加来源</button>
+          </div>
+          <div id="subscriptionSourceList" class="subscription-source-list">
+            <span class="history-empty">暂无来源</span>
+          </div>
+          <p id="subscriptionFreshnessNote" class="zotero-install-note">订阅 Alert 可能比开放元数据更快；只导入你已可见或已授权的内容。</p>
+          <div class="alert-inbox-block">
+            <div class="alert-inbox-heading">
+              <div>
+                <strong>Alert 收件箱</strong>
+                <span id="alertInboxStatusNote">正在加载 Alert 收件箱...</span>
+              </div>
+            </div>
+            <div class="subscription-actions">
+              <button id="adoptAlertInboxButton" class="secondary-action compact-action" type="button" disabled>批量采用</button>
+              <button id="refreshAlertInboxButton" class="secondary-action compact-action" type="button">刷新收件箱</button>
+            </div>
+            <label class="alert-inbox-filter">
+              <span>过滤</span>
+              <select id="alertInboxFilter">
+                <option value="active" selected>待处理</option>
+                <option value="adoptable">可采用</option>
+                <option value="conflict">冲突</option>
+                <option value="locked">锁定</option>
+                <option value="partial">不完整</option>
+                <option value="adopted">已采用</option>
+                <option value="all">全部</option>
+              </select>
+            </label>
+            <div id="alertInboxList" class="alert-inbox-list">
+              <span class="history-empty">正在加载 Alert 收件箱...</span>
+            </div>
+          </div>
+          <div class="history-block subscription-history-block">
+            <div class="history-title">最近 Alert 导入</div>
+            <div id="subscriptionImportHistory" class="history-list">
+              <span class="history-empty">正在加载导入历史...</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="research-radar-panel" aria-label="研究雷达">
+          <div class="library-heading">
+            <div>
+              <strong>研究雷达</strong>
+              <span id="researchRadarStatus">基于收藏、Alert、翻译和 Zotero 状态生成行动队列</span>
+            </div>
+          </div>
+          <div class="subscription-actions">
+            <button id="refreshResearchRadarButton" class="secondary-action compact-action" type="button">刷新雷达</button>
+            <button id="smartResearchBriefButton" class="secondary-action compact-action" type="button">智能简报</button>
+          </div>
+          <div id="researchRadarStats" class="radar-stats">
+            <span class="history-empty">暂无雷达统计</span>
+          </div>
+          <div id="researchRadarBrief" class="radar-brief">
+            <span class="history-empty">智能简报会在点击后生成</span>
+          </div>
+          <div class="radar-grid">
+            <div>
+              <div class="history-title">行动队列</div>
+              <div id="researchRadarActions" class="radar-action-list">
+                <span class="history-empty">暂无待办动作</span>
+              </div>
+            </div>
+            <div>
+              <div class="history-title">重点论文</div>
+              <div id="researchRadarDigest" class="radar-digest-list">
+                <span class="history-empty">刷新后显示重点条目</span>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -275,12 +424,16 @@
 
           <div class="export-row">
             <button id="exportFavoritesBibButton" class="secondary-action compact-action" type="button" disabled>导出收藏 BibTeX</button>
+            <button id="exportFavoritesRisButton" class="secondary-action compact-action" type="button" disabled>导出收藏 RIS</button>
+            <button id="saveFavoritesZoteroButton" class="secondary-action compact-action" type="button" disabled>保存到 Zotero</button>
             <button id="exportFavoritesMarkdownButton" class="secondary-action compact-action" type="button" disabled>导出阅读清单</button>
             <button id="exportFavoritesBilingualButton" class="secondary-action compact-action" type="button" disabled>批量导出中英对照摘要</button>
             <button id="batchTranslateButton" class="secondary-action compact-action" type="button" disabled>批量翻译摘要</button>
+            <button id="importAlertButton" class="secondary-action compact-action" type="button">导入 Alert</button>
           </div>
           <div class="refresh-row">
             <button id="refreshFavoritesButton" class="secondary-action compact-action" type="button" disabled>刷新收藏元数据</button>
+            <button id="enrichAbstractsButton" class="secondary-action compact-action" type="button" disabled>补全摘要</button>
             <span id="libraryRefreshNote">旧收藏的摘要可能已截断，刷新后会尽量补全。</span>
           </div>
 
@@ -356,6 +509,22 @@
             title="导出当前搜索结果为 BibTeX"
             aria-label="导出当前搜索结果为 BibTeX"
           >导出 BibTeX</button>
+          <button
+            id="exportResultsRisButton"
+            class="secondary-action"
+            type="button"
+            disabled
+            title="导出当前搜索结果为 RIS，可导入 Zotero 或 EndNote"
+            aria-label="导出当前搜索结果为 RIS，可导入 Zotero 或 EndNote"
+          >导出 RIS</button>
+          <button
+            id="saveResultsZoteroButton"
+            class="secondary-action"
+            type="button"
+            disabled
+            title="保存当前搜索结果题录到本机 Zotero"
+            aria-label="保存当前搜索结果题录到本机 Zotero"
+          >保存到 Zotero</button>
         </section>
 
         <div class="progress-track" aria-hidden="true">
@@ -372,6 +541,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=20260530-complete-abstract" defer></script>
+    <script src="/app.js?v=20260608-alert-inbox-state" defer></script>
   </body>
 </html>
