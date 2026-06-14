@@ -13,11 +13,16 @@ env/
 
 # Local runtime data
 .cache/
+.paperhunter.*.pid
 data/
 downloaded_papers/
 translated_papers/
+output/
+test-results/
+tmp-*.png
 *.pdf
 *.tmp
+zotero-bridge/*.xpi
 
 # Local machine / assistant files
 path.txt
@@ -26,6 +31,7 @@ path.txt
 .tools/
 .claude/
 .agents/
+docs/social/
 
 # OS / editor
 .DS_Store
