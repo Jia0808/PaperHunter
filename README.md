@@ -27,6 +27,7 @@ The project uses a plain Python backend and a native HTML/CSS/JavaScript fronten
 - Per-source result limits, so one large source does not dominate the list.
 - Local PDF download with duplicate detection.
 - Local paper inbox for favorites, ignored papers, reading status, tags, notes, recent searches, download status, and full-text translation state, stored in `data/library.json`.
+- Alert inbox for user-visible ScienceDirect/Web of Science-style alerts: import alert text, review candidate records, adopt complete abstracts, lock accepted records, and keep the original alert trail in the local library.
 - Model settings panel for OpenAI-compatible Responses/Chat Completions endpoints, DeepSeek, Anthropic, and custom providers.
 - Abstract translation for a single paper or a batch of favorites, with stale-translation detection when source abstracts change.
 - Zotero round-trip integration: save discovered records to Zotero, import local Zotero records and PDF attachments, and sync PaperHunter translations and status tags back through the PaperHunter Zotero Bridge.
@@ -146,16 +147,17 @@ If the panel still says the bridge is required, make sure Zotero is running, rei
 2. Select research intent, field, year range, source group, and per-source limit.
 3. Run the search and review metadata, venues, years, and PDF availability.
 4. Save useful papers to the local inbox, ignore papers you do not want to see again, and optionally add reading status, tags, or notes.
-5. Configure a model endpoint if you want abstract or full-text translation.
-6. Translate one abstract, batch-translate favorite abstracts, or retranslate stale summaries after metadata changes.
-7. Save records to Zotero, or import existing Zotero library items and PDF attachments.
-8. Download selected open-access PDFs or batch-download downloadable results.
-9. Translate downloaded full text into bilingual Markdown, monitor chunk progress, and open the output folder when the task is complete.
-10. Enable the PaperHunter Zotero Bridge to sync abstract translations, full-text translation attachments, and status tags back to Zotero.
-11. Export saved favorites as BibTeX, RIS for Zotero/EndNote, a Markdown reading list, or a bilingual English/Chinese summary file.
-12. Refresh favorite metadata when older saved items show truncated abstracts.
-13. Export a workspace backup before moving machines or cleaning local runtime data.
-14. Use external gateway buttons when a source needs browser-side login or institution access.
+5. Import user-visible alerts into the Alert inbox when a publisher or database alert contains fresher metadata than open sources, then adopt and lock complete abstracts into the local paper record.
+6. Configure a model endpoint if you want abstract or full-text translation.
+7. Translate one abstract, batch-translate favorite abstracts, or retranslate stale summaries after metadata changes.
+8. Save records to Zotero, or import existing Zotero library items and PDF attachments.
+9. Download selected open-access PDFs or batch-download downloadable results.
+10. Translate downloaded full text into bilingual Markdown, monitor chunk progress, and open the output folder when the task is complete.
+11. Enable the PaperHunter Zotero Bridge to sync abstract translations, full-text translation attachments, and status tags back to Zotero.
+12. Export saved favorites as BibTeX, RIS for Zotero/EndNote, a Markdown reading list, or a bilingual English/Chinese summary file.
+13. Refresh favorite metadata when older saved items show truncated abstracts.
+14. Export a workspace backup before moving machines or cleaning local runtime data.
+15. Use external gateway buttons when a source needs browser-side login or institution access.
 
 ## Project Structure
 
