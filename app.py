@@ -213,9 +213,14 @@ MODEL_PROVIDER_PRESETS = [
         "apiType": "responses",
         "baseUrl": "https://apixin.top",
         "endpoint": "/v1/responses",
-        "defaultModel": "gpt-5.5",
-        "badges": ["推荐", "GPT", "Responses"],
-        "description": "适合快速启用 GPT 摘要翻译，配置简单。",
+        "defaultModel": "gpt-5.6-sol",
+        "modelOptions": [
+            {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol"},
+            {"id": "gpt-5.6-luna", "label": "GPT-5.6 Luna"},
+            {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra"},
+        ],
+        "badges": ["推荐", "GPT 5.6", "Responses"],
+        "description": "支持 GPT-5.6 Sol、Luna 和 Terra 快捷选择。",
     },
     {
         "id": "apixin_multi",

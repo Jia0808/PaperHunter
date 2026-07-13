@@ -241,6 +241,8 @@ const elements = {
   modelBaseUrl: document.querySelector("#modelBaseUrlInput"),
   modelEndpoint: document.querySelector("#modelEndpointInput"),
   modelName: document.querySelector("#modelNameInput"),
+  modelPresetField: document.querySelector("#modelPresetField"),
+  modelPresetOptions: document.querySelector("#modelPresetOptions"),
   modelApiKey: document.querySelector("#modelApiKeyInput"),
   modelKeyHint: document.querySelector("#modelKeyHint"),
   modelFinalUrl: document.querySelector("#modelFinalUrl"),
@@ -265,6 +267,9 @@ const elements = {
   libraryTabs: document.querySelectorAll("[data-library-view]"),
   libraryItems: document.querySelector("#libraryItems"),
   searchHistory: document.querySelector("#searchHistory"),
+  contactQqGroup: document.querySelector("#contactQqGroup"),
+  copyContactQq: document.querySelector("#copyContactQqButton"),
+  contactCopyStatus: document.querySelector("#contactCopyStatus"),
   progress: document.querySelector("#progressBar"),
 };
 
@@ -789,6 +794,38 @@ function renderProviderCards() {
   });
 }
 
+function renderModelPresetOptions() {
+  if (!elements.modelPresetField || !elements.modelPresetOptions) {
+    return;
+  }
+  const provider = state.modelProviders.find((item) => item.id === state.selectedProvider);
+  const options = Array.isArray(provider?.modelOptions) ? provider.modelOptions : [];
+  elements.modelPresetField.hidden = options.length === 0;
+  elements.modelPresetOptions.replaceChildren();
+
+  options.forEach((option) => {
+    const modelId = typeof option === "string" ? option : String(option.id || "").trim();
+    if (!modelId) {
+      return;
+    }
+    const label = typeof option === "string" ? option : String(option.label || modelId);
+    const button = document.createElement("button");
+    const isActive = elements.modelName.value.trim() === modelId;
+    button.className = "model-preset-option";
+    button.classList.toggle("is-active", isActive);
+    button.type = "button";
+    button.textContent = label;
+    button.title = `选择模型 ${modelId}`;
+    button.setAttribute("aria-pressed", String(isActive));
+    button.addEventListener("click", () => {
+      elements.modelName.value = modelId;
+      renderModelPresetOptions();
+      setModelStatus("未测试");
+    });
+    elements.modelPresetOptions.append(button);
+  });
+}
+
 function applyProvider(provider) {
   state.selectedProvider = provider.id || "custom";
   elements.modelApiType.value = provider.apiType || "chat_completions";
@@ -797,6 +834,7 @@ function applyProvider(provider) {
   elements.modelName.value = provider.defaultModel || "";
   elements.modelApiKey.value = "";
   renderProviderCards();
+  renderModelPresetOptions();
   updateModelPreview();
   setModelStatus("未测试");
 }
@@ -817,6 +855,7 @@ function applyModelSettings(settings = {}) {
     elements.selfHostedModel.checked = Boolean(settings.selfHostedModel);
   }
   renderProviderCards();
+  renderModelPresetOptions();
   updateModelPreview();
 }
 
@@ -4171,6 +4210,24 @@ async function copyText(text) {
   textarea.remove();
 }
 
+async function copyContactQqGroup() {
+  const groupNumber = elements.contactQqGroup?.textContent.trim() || "";
+  if (!groupNumber || !elements.copyContactQq || !elements.contactCopyStatus) {
+    return;
+  }
+  elements.copyContactQq.disabled = true;
+  try {
+    await copyText(groupNumber);
+    elements.contactCopyStatus.textContent = `QQ群号已复制：${groupNumber}`;
+    elements.contactCopyStatus.className = "contact-status is-success";
+  } catch (_error) {
+    elements.contactCopyStatus.textContent = `复制失败，请手动记录群号：${groupNumber}`;
+    elements.contactCopyStatus.className = "contact-status is-error";
+  } finally {
+    elements.copyContactQq.disabled = false;
+  }
+}
+
 function createPaperCard(paper, index) {
   const card = document.createElement("article");
   card.className = "paper-card";
@@ -5737,6 +5794,7 @@ elements.modelApiType.addEventListener("change", () => {
 });
 elements.modelBaseUrl.addEventListener("input", updateModelPreview);
 elements.modelEndpoint.addEventListener("input", updateModelPreview);
+elements.modelName.addEventListener("input", renderModelPresetOptions);
 if (elements.privatePdfMode) {
   elements.privatePdfMode.addEventListener("change", updateModelPreview);
 }
@@ -5745,6 +5803,9 @@ if (elements.selfHostedModel) {
 }
 elements.saveModel.addEventListener("click", saveModelSettings);
 elements.testModel.addEventListener("click", testModelConnection);
+if (elements.copyContactQq) {
+  elements.copyContactQq.addEventListener("click", copyContactQqGroup);
+}
 elements.exportBackup.addEventListener("click", exportWorkspaceBackup);
 elements.importBackup.addEventListener("change", importWorkspaceBackup);
 elements.libraryTabs.forEach((button) => {

@@ -43,6 +43,19 @@ class FrontendStaticRegressionTests(unittest.TestCase):
         self.assertIn(".backup-preview-dialog", styles)
         self.assertIn(".bridge-wizard-step", styles)
 
+    def test_gpt_model_presets_and_qq_contact_are_visible_and_interactive(self):
+        index_html = self.read_asset("web/index.html")
+        app_js = self.read_asset("web/app.js")
+        styles = self.read_asset("web/styles.css")
+
+        self.assertIn('id="modelPresetOptions"', index_html)
+        self.assertIn('id="contactQqGroup">1060433705', index_html)
+        self.assertIn('id="copyContactQqButton"', index_html)
+        self.assertIn("renderModelPresetOptions", app_js)
+        self.assertIn("copyContactQqGroup", app_js)
+        self.assertIn(".model-preset-option.is-active", styles)
+        self.assertIn(".contact-panel", styles)
+
 
 if __name__ == "__main__":
     unittest.main()

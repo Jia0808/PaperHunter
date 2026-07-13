@@ -2575,6 +2575,15 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(public["selfHostedModel"])
         self.assertFalse(public["modelEndpointIsLocal"])
 
+    def test_apixin_gpt_provider_exposes_requested_model_options(self):
+        provider = next(item for item in app.MODEL_PROVIDER_PRESETS if item["id"] == "apixin_gpt")
+
+        self.assertEqual("gpt-5.6-sol", provider["defaultModel"])
+        self.assertEqual(
+            ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"],
+            [item["id"] for item in provider["modelOptions"]],
+        )
+
     def test_model_settings_preserve_existing_key_when_blank(self):
         existing = app.normalize_settings({
             "provider": "apixin_gpt",
