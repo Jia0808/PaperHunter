@@ -82,7 +82,7 @@ PaperHunter 可以通过你在界面中配置的模型接口翻译摘要和已�
 
 当前支持的预设包括：
 
-- APIXIN GPT 兼容接口
+- APIXIN GPT 兼容接口，内置 `gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.6-terra` 快捷选择
 - DeepSeek Chat Completions
 - Anthropic Messages
 - 自定义 OpenAI 兼容 Responses 或 Chat Completions 接口
@@ -90,6 +90,10 @@ PaperHunter 可以通过你在界面中配置的模型接口翻译摘要和已�
 模型设置会保存到 `data/settings.json`，该文件已被 Git 忽略。状态接口只返回脱敏后的 API Key；工作区备份会在写入 `data/settings.json` 前移除 API Key。
 
 翻译请求会把选中的摘要或全文分片发送到你配置的模型提供商。PaperHunter 不查询账户余额，也不会在你没有触发翻译操作时发送论文内容。
+
+## 联系与反馈
+
+QQ 群：`1060433705`
 
 如果 OpenAI 兼容的 Responses 端点返回 `completed` 但没有可见文本，PaperHunter 会在可以推断出对应路径时自动改用同一网关的 Chat Completions 路由重试。这样可以兼容同时支持两种 API、但只在 Chat Completions 响应中暴露文本的中转服务。
 

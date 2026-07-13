@@ -82,7 +82,7 @@ PaperHunter can translate abstracts and downloaded full text through a model end
 
 Supported presets include:
 
-- APIXIN GPT-compatible endpoints
+- APIXIN GPT-compatible endpoints with quick selection for `gpt-5.6-sol`, `gpt-5.6-luna`, and `gpt-5.6-terra`
 - DeepSeek Chat Completions
 - Anthropic Messages
 - custom OpenAI-compatible Responses or Chat Completions endpoints
@@ -90,6 +90,10 @@ Supported presets include:
 Model settings are saved to `data/settings.json`, which is ignored by Git. The public status API returns only a masked key, and workspace backups intentionally remove the API key before writing `data/settings.json` into the backup ZIP.
 
 Translation requests send the selected abstract or full-text chunk to the configured model provider. PaperHunter does not query your account balance and does not send papers for translation unless you trigger a translation action.
+
+## Contact
+
+QQ group: `1060433705`
 
 If an OpenAI-compatible Responses endpoint returns a completed response without visible text, PaperHunter retries the request through the matching Chat Completions route when that fallback can be inferred. This keeps gateway providers usable when they support both APIs but expose model output only through Chat Completions.
 
